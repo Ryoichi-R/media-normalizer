@@ -1,0 +1,27 @@
+# Workspace-private records and local state
+_internal/
+.media-normalizer-running.lock
+settings.json
+**/settings.json
+*.log
+*.log.1
+**/*.log
+**/*.log.1
+
+# Generated build and distribution outputs
+artifacts/
+installer/payload/
+.work/
+bin/
+obj/
+TestResults/
+coverage/
+
+# IDE and operating-system files
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,124 @@
+{
+    "schema_version": "1.0",
+    "public_root": ".",
+    "profiles": ["source-repository", "binary-application"],
+    "documents": [
+        {
+            "path": "README.md",
+            "required_sections": [
+                "Overview",
+                "Requirements",
+                "Installation",
+                "Usage",
+                "Development",
+                "Configuration",
+                "Uninstall",
+                "Known limitations",
+                "Security",
+                "Support",
+                "License"
+            ]
+        },
+        {
+            "path": "LICENSE",
+            "required_sections": []
+        },
+        {
+            "path": "THIRD-PARTY-NOTICES.md",
+            "required_sections": [
+                "FFmpeg",
+                "Embedded Python",
+                "Python packages"
+            ]
+        }
+    ],
+    "candidate": {
+        "allowlist": ["**"],
+        "denylist": [
+            "_internal",
+            "artifacts",
+            "installer/payload",
+            ".work",
+            "bin",
+            "obj",
+            "TestResults",
+            "coverage",
+            ".media-normalizer-running.lock",
+            "settings.json",
+            "**/settings.json",
+            "*.log",
+            "*.log.1",
+            "**/*.log",
+            "**/*.log.1",
+            ".vs",
+            ".vscode",
+            ".idea"
+        ],
+        "max_file_bytes": 10485760,
+        "max_total_bytes": 52428800,
+        "allow_reparse_points": false
+    },
+    "validation": {
+        "required_receipt_types": [
+            "quality",
+            "artifact",
+            "manual-acceptance",
+            "clean-verification"
+        ],
+        "expected_test_projects": ["media-normalizer/project"],
+        "minimum_test_count": 263,
+        "allow_skips": true,
+        "minimum_line_coverage": 90,
+        "minimum_branch_coverage": null,
+        "require_formatter": true,
+        "require_linter": false,
+        "require_dependency_review": true
+    },
+    "manual_acceptance": [
+        {
+            "id": "arm64-native-gui",
+            "requirement": "required",
+            "reason": "Windows ARM64 native hostでGUI起動と基本操作を確認する。"
+        },
+        {
+            "id": "x64-runtime-cli",
+            "requirement": "required",
+            "reason": "Windows x64 hostでruntime checkとpackaged CLIを確認する。"
+        },
+        {
+            "id": "installer-isolated-update-rollback",
+            "requirement": "required",
+            "reason": "新規install、update、拒否条件、設定保持、rollbackを隔離先で確認する。"
+        }
+    ],
+    "artifacts": [
+        {
+            "id": "portable-x64",
+            "path_pattern": "artifacts/media-normalizer-win-x64.zip",
+            "runtime": "win-x64",
+            "architectures": ["x64"],
+            "allowed_extensions": [".zip"],
+            "forbidden_names": [".env", "Desktop.ini", "Thumbs.db"],
+            "signature_policy": "optional-with-disclosure",
+            "unsigned_disclosure_path": "README.md",
+            "debug_symbols": "forbidden"
+        },
+        {
+            "id": "portable-arm64",
+            "path_pattern": "artifacts/media-normalizer-win-arm64.zip",
+            "runtime": "win-arm64",
+            "architectures": ["arm64"],
+            "allowed_extensions": [".zip"],
+            "forbidden_names": [".env", "Desktop.ini", "Thumbs.db"],
+            "signature_policy": "optional-with-disclosure",
+            "unsigned_disclosure_path": "README.md",
+            "debug_symbols": "forbidden"
+        }
+    ],
+    "integrity": {
+        "require_hashes": true,
+        "require_sbom": false,
+        "require_dependency_review": true,
+        "require_clean_install": true
+    }
+}

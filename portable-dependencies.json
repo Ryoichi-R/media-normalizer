@@ -1,0 +1,89 @@
+{
+    "schemaVersion": 1,
+    "ffmpeg": {
+        "version": "8.1.2-31-g8c9502e9b0",
+        "license": "GPL-3.0-or-later",
+        "release": "autobuild-2026-07-24-13-32",
+        "sourceUrl": "https://github.com/FFmpeg/FFmpeg/tree/8c9502e9b0",
+        "buildSourceUrl": "https://github.com/BtbN/FFmpeg-Builds/tree/8c736b2",
+        "runtimes": {
+            "win-x64": {
+                "archiveName": "ffmpeg-n8.1.2-31-g8c9502e9b0-win64-gpl-8.1.zip",
+                "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-24-13-32/ffmpeg-n8.1.2-31-g8c9502e9b0-win64-gpl-8.1.zip",
+                "sha256": "ef4f875f374414a6c49bdc91f1acc227e65d0a82af6e6888874a7b812a18de97"
+            },
+            "win-arm64": {
+                "archiveName": "ffmpeg-n8.1.2-31-g8c9502e9b0-winarm64-gpl-8.1.zip",
+                "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-24-13-32/ffmpeg-n8.1.2-31-g8c9502e9b0-winarm64-gpl-8.1.zip",
+                "sha256": "f84f065fddec914d8af6089a41ab9d0aceebcf3e617fd278e1f02350998a245b"
+            }
+        }
+    },
+    "python": {
+        "version": "3.13.14",
+        "license": "PSF-2.0",
+        "sourceUrl": "https://www.python.org/downloads/release/python-31314/",
+        "runtimes": {
+            "win-x64": {
+                "archiveName": "python-3.13.14-embed-amd64.zip",
+                "url": "https://www.python.org/ftp/python/3.13.14/python-3.13.14-embed-amd64.zip",
+                "sha256": "90b4e5b9898b72d744650524bff92377c367f44bd5fbd09e3148656c080ad907"
+            },
+            "win-arm64": {
+                "archiveName": "python-3.13.14-embed-arm64.zip",
+                "url": "https://www.python.org/ftp/python/3.13.14/python-3.13.14-embed-arm64.zip",
+                "sha256": "8b5bfc935a24b55c17410aa0b21016ebeee225c96addf008d1d3cd83ff52eb43"
+            }
+        }
+    },
+    "pythonPackages": [
+        {
+            "name": "ffmpeg-normalize",
+            "version": "1.41.1",
+            "license": "MIT",
+            "archiveName": "ffmpeg_normalize-1.41.1-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/69/7a/98dfaabd39409ebbb9c70116e318daf9979e43069931552f1686159fe154/ffmpeg_normalize-1.41.1-py3-none-any.whl",
+            "sha256": "659e9c7ef57df30c77c6480977ac6a1af6bb8e015123e47ed0c17e5eb7362b9b"
+        },
+        {
+            "name": "tqdm",
+            "version": "4.69.1",
+            "license": "MPL-2.0 AND MIT",
+            "archiveName": "tqdm-4.69.1-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/01/50/5817619a0fca56aff06383dbfde7ae017b3ca383915b3f1e4713164273cf/tqdm-4.69.1-py3-none-any.whl",
+            "sha256": "0a654b96f7a2660cceb615b56f307ec2bef96c515409014a429a561981ab52b4"
+        },
+        {
+            "name": "colorama",
+            "version": "0.4.6",
+            "license": "BSD-3-Clause",
+            "archiveName": "colorama-0.4.6-py2.py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl",
+            "sha256": "4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6"
+        },
+        {
+            "name": "ffmpeg-progress-yield",
+            "version": "1.1.3",
+            "license": "MIT",
+            "archiveName": "ffmpeg_progress_yield-1.1.3-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/fd/c7/c42ce9353ae6b70bd920856a97736ac81e068901fb537126365e6735f1c8/ffmpeg_progress_yield-1.1.3-py3-none-any.whl",
+            "sha256": "4eb4948a72414608c7b05c8061aff85ff47e31e33f629abc22d08d0b03196c62"
+        },
+        {
+            "name": "colorlog",
+            "version": "6.7.0",
+            "license": "MIT",
+            "archiveName": "colorlog-6.7.0-py2.py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/58/43/a363c213224448f9e194d626221123ce00e3fb3d87c0c22aed52b620bdd1/colorlog-6.7.0-py2.py3-none-any.whl",
+            "sha256": "0d33ca236784a1ba3ff9c532d4964126d8a2c44f1f0cb1d2b0728196f512f662"
+        },
+        {
+            "name": "mutagen",
+            "version": "1.48.1",
+            "license": "GPL-2.0-or-later",
+            "archiveName": "mutagen-1.48.1-py3-none-any.whl",
+            "url": "https://files.pythonhosted.org/packages/47/d8/a29e4e3991765e7ce4ed1f7e4074fe1ba9da03e0048639734de60f9cadb9/mutagen-1.48.1-py3-none-any.whl",
+            "sha256": "4f077fe87d3fc7fba259aa63d8c026b18382ca6a42ef37c61e16f1b1b5b82fe7"
+        }
+    ]
+}

@@ -1,0 +1,49 @@
+{
+    "version": 2,
+    "presets": [
+        {
+            "name": "デフォルト",
+            "target": -16.0,
+            "truePeak": -1.0,
+            "bitrate": "192k",
+            "sampleRate": 48000,
+            "outputFormat": "mp3",
+            "purpose": "会話中心の一般コンテンツ向け",
+            "basis": "運用上の初期値（特定プラットフォームの公式規格ではありません）",
+            "warning": "納品先・放送局・配信サービスの指定がある場合は、その仕様を優先してください。"
+        },
+        {
+            "name": "放送（EBU R 128）",
+            "target": -23.0,
+            "truePeak": -2.0,
+            "bitrate": "256k",
+            "sampleRate": 48000,
+            "outputFormat": "m4a",
+            "purpose": "EBU R 128を採用する放送ワークフローの確認用",
+            "basis": "EBU R 128 の番組ラウドネス基準 -23 LUFS",
+            "warning": "局別のTrue Peak、短時間ラウドネス、コーデック、納品コンテナ要件を必ず確認してください。"
+        },
+        {
+            "name": "動画配信（-14 LUFS目安）",
+            "target": -14.0,
+            "truePeak": -1.0,
+            "bitrate": "192k",
+            "sampleRate": 48000,
+            "outputFormat": "m4a",
+            "purpose": "一般的な動画配信向けの運用目安",
+            "basis": "-14 LUFSは実務上よく使われる目安で、YouTube公式の納品規格ではありません",
+            "warning": "サービス側の再生時音量調整は変更され得ます。マスター要件と試聴結果を優先してください。"
+        },
+        {
+            "name": "ポッドキャスト",
+            "target": -16.0,
+            "truePeak": -1.0,
+            "bitrate": "128k",
+            "sampleRate": 44100,
+            "outputFormat": "mp3",
+            "purpose": "ステレオの会話・ポッドキャスト向け",
+            "basis": "会話番組で広く使われる -16 LUFS の運用目安",
+            "warning": "配信先がモノラル値や独自のTrue Peak上限を指定する場合は、その値へ変更してください。"
+        }
+    ]
+}

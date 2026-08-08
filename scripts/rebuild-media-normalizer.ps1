@@ -1,0 +1,811 @@
+<#
+.SYNOPSIS
+    Media NormalizerをRID別の自己完結型ポータブルフォルダーへ再構築する。
+
+.PARAMETER Runtime
+    出力対象のWindows RID。win-x64またはwin-arm64。
+
+.PARAMETER OutputRoot
+    出力を格納する既存の親ディレクトリ。相対パスはプロジェクトルート基準。
+    プロジェクトルートの場合はartifactsを使用し、それ以外では直下に
+    MediaNormalizerBuildsを作成する。
+
+.PARAMETER SelectOutputRoot
+    OutputRootが省略された場合、Windowsのフォルダー選択ダイアログを表示する。
+
+.PARAMETER CleanBuild
+    既存ランタイムと共有キャッシュを使わず、隔離した空キャッシュへ固定依存物を
+    すべて再取得して配布物を構築する。
+
+.PARAMETER DownloadTimeoutSeconds
+    完全クリーンビルドまたは初回取得時の、1回の依存取得に対するタイムアウト秒数。
+
+.PARAMETER DownloadRetryCount
+    完全クリーンビルドまたは初回取得時の、初回失敗後の追加試行回数。
+#>
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory)]
+    [ValidateSet('win-x64', 'win-arm64')]
+    [string]$Runtime,
+    [string]$OutputRoot,
+    [switch]$SelectOutputRoot,
+    [string]$PreparedRuntimeRoot,
+    [switch]$CleanBuild,
+    [ValidateRange(30, 3600)]
+    [int]$DownloadTimeoutSeconds = 900,
+    [ValidateRange(0, 5)]
+    [int]$DownloadRetryCount = 2
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'shared\secret-patterns.ps1')
+
+if ($CleanBuild -and -not [string]::IsNullOrWhiteSpace($PreparedRuntimeRoot)) {
+    throw 'CleanBuild cannot be combined with PreparedRuntimeRoot.'
+}
+
+function ConvertTo-GuardedDirectoryPath {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $filesystemRoot = [IO.Path]::GetPathRoot($fullPath)
+    if ($fullPath -ieq $filesystemRoot) {
+        return $filesystemRoot
+    }
+
+    return $fullPath.TrimEnd(
+        [IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar)
+}
+
+function Assert-PathWithinRoot {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Root
+    )
+
+    $rootFull = ConvertTo-GuardedDirectoryPath -Path $Root
+    $pathFull = [IO.Path]::GetFullPath($Path)
+    $rootPrefix = if ($rootFull.EndsWith(
+            [IO.Path]::DirectorySeparatorChar.ToString(),
+            [StringComparison]::Ordinal)) {
+        $rootFull
+    }
+    else {
+        $rootFull + [IO.Path]::DirectorySeparatorChar
+    }
+
+    if ($pathFull -ne $rootFull -and
+        -not $pathFull.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to operate outside the allowed root: $pathFull"
+    }
+    return $pathFull
+}
+
+function Assert-ManagedDirectory {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$ExpectedLeaf
+    )
+
+    $pathFull = Assert-PathWithinRoot -Path $Path -Root $Root
+    if ((Split-Path -Leaf $pathFull) -cne $ExpectedLeaf) {
+        throw "Refusing to manage an unexpected directory: $pathFull"
+    }
+    if (Test-Path -LiteralPath $pathFull) {
+        if (-not (Test-Path -LiteralPath $pathFull -PathType Container)) {
+            throw "Managed path exists but is not a directory: $pathFull"
+        }
+        if ((Get-Item -LiteralPath $pathFull -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "Managed directory cannot be a symbolic link or junction: $pathFull"
+        }
+    }
+    return $pathFull
+}
+
+function Clear-DirectoryContents {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$AllowedRoot
+    )
+
+    $pathFull = Assert-PathWithinRoot -Path $Path -Root $AllowedRoot
+    New-Item -ItemType Directory -Path $pathFull -Force | Out-Null
+    Get-ChildItem -LiteralPath $pathFull -Force | ForEach-Object {
+        $child = Assert-PathWithinRoot -Path $_.FullName -Root $pathFull
+        Remove-Item -LiteralPath $child -Recurse -Force
+    }
+}
+
+function Copy-DirectoryContents {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][string]$SourceRoot,
+        [Parameter(Mandatory)][string]$DestinationRoot
+    )
+
+    $sourceFull = Assert-PathWithinRoot -Path $Source -Root $SourceRoot
+    $destinationFull = Assert-PathWithinRoot -Path $Destination -Root $DestinationRoot
+    if (-not (Test-Path -LiteralPath $sourceFull -PathType Container)) {
+        throw "Copy source is not a directory: $sourceFull"
+    }
+    $reparsePoint = Get-ChildItem -LiteralPath $sourceFull -Recurse -Force |
+        Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint } |
+        Select-Object -First 1
+    if ($null -ne $reparsePoint) {
+        throw "Copy source cannot contain a symbolic link or junction: $($reparsePoint.FullName)"
+    }
+    New-Item -ItemType Directory -Path $destinationFull -Force | Out-Null
+    Get-ChildItem -LiteralPath $sourceFull -Force | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $destinationFull -Recurse -Force
+    }
+}
+
+function Sync-DirectoryContents {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$Destination,
+        [Parameter(Mandatory)][string]$SourceRoot,
+        [Parameter(Mandatory)][string]$DestinationRoot
+    )
+
+    $sourceFull = Assert-PathWithinRoot -Path $Source -Root $SourceRoot
+    $destinationFull = Assert-PathWithinRoot -Path $Destination -Root $DestinationRoot
+    if (-not (Test-Path -LiteralPath $sourceFull -PathType Container)) {
+        throw "Sync source is not a directory: $sourceFull"
+    }
+
+    $sourceItems = @(Get-ChildItem -LiteralPath $sourceFull -Recurse -Force)
+    $destinationItems = if (Test-Path -LiteralPath $destinationFull -PathType Container) {
+        @(Get-ChildItem -LiteralPath $destinationFull -Recurse -Force)
+    }
+    else {
+        @()
+    }
+    $reparsePoint = @($sourceItems + $destinationItems) |
+        Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint } |
+        Select-Object -First 1
+    if ($null -ne $reparsePoint) {
+        throw "Synchronized directories cannot contain a symbolic link or junction: $($reparsePoint.FullName)"
+    }
+
+    $sourceRelativePaths = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase)
+    foreach ($sourceItem in $sourceItems) {
+        [void]$sourceRelativePaths.Add(
+            [IO.Path]::GetRelativePath($sourceFull, $sourceItem.FullName))
+    }
+
+    foreach ($destinationItem in $destinationItems |
+        Sort-Object { $_.FullName.Length } -Descending) {
+        $relativePath = [IO.Path]::GetRelativePath($destinationFull, $destinationItem.FullName)
+        if (-not $sourceRelativePaths.Contains($relativePath)) {
+            $safeItem = Assert-PathWithinRoot -Path $destinationItem.FullName -Root $destinationFull
+            Remove-Item -LiteralPath $safeItem -Recurse -Force
+        }
+    }
+
+    New-Item -ItemType Directory -Path $destinationFull -Force | Out-Null
+    foreach ($sourceDirectory in $sourceItems |
+        Where-Object { $_.PSIsContainer } |
+        Sort-Object FullName) {
+        $relativePath = [IO.Path]::GetRelativePath($sourceFull, $sourceDirectory.FullName)
+        $destinationDirectory = Assert-PathWithinRoot `
+            -Path (Join-Path $destinationFull $relativePath) `
+            -Root $destinationFull
+        New-Item -ItemType Directory -Path $destinationDirectory -Force | Out-Null
+    }
+    foreach ($sourceFile in $sourceItems | Where-Object { -not $_.PSIsContainer }) {
+        $relativePath = [IO.Path]::GetRelativePath($sourceFull, $sourceFile.FullName)
+        $destinationFile = Assert-PathWithinRoot `
+            -Path (Join-Path $destinationFull $relativePath) `
+            -Root $destinationFull
+        $unchanged = (Test-Path -LiteralPath $destinationFile -PathType Leaf) -and
+            (Get-Item -LiteralPath $destinationFile).Length -eq $sourceFile.Length -and
+            (Get-FileHash -LiteralPath $destinationFile -Algorithm SHA256).Hash -eq
+            (Get-FileHash -LiteralPath $sourceFile.FullName -Algorithm SHA256).Hash
+        if (-not $unchanged) {
+            Copy-Item -LiteralPath $sourceFile.FullName -Destination $destinationFile -Force
+        }
+    }
+}
+
+function Get-DirectoryDigest {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$AllowedRoot
+    )
+
+    $pathFull = Assert-PathWithinRoot -Path $Path -Root $AllowedRoot
+    $lines = foreach ($file in Get-ChildItem -LiteralPath $pathFull -File -Recurse -Force |
+        Sort-Object FullName) {
+        if ($file.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "Digest source cannot contain a symbolic link: $($file.FullName)"
+        }
+        $relativePath = [IO.Path]::GetRelativePath($pathFull, $file.FullName).Replace('\', '/')
+        $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+        "$relativePath`t$($file.Length)`t$hash"
+    }
+    $manifest = $lines -join "`n"
+    return [Convert]::ToHexString(
+        [Security.Cryptography.SHA256]::HashData(
+            [Text.Encoding]::UTF8.GetBytes($manifest)))
+}
+
+function Get-PeMachine {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $reader = [IO.BinaryReader]::new($stream)
+        $stream.Position = 0x3c
+        $peOffset = $reader.ReadInt32()
+        if ($peOffset -lt 0 -or $peOffset + 6 -gt $stream.Length) {
+            throw "Invalid PE header offset: $Path"
+        }
+        $stream.Position = $peOffset
+        if ($reader.ReadUInt32() -ne 0x00004550) {
+            throw "Invalid PE signature: $Path"
+        }
+        return $reader.ReadUInt16()
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
+function Select-OutputRootFolder {
+    param([Parameter(Mandatory)][string]$InitialDirectory)
+
+    if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne [Threading.ApartmentState]::STA) {
+        throw 'フォルダー選択画面を表示するには、PowerShellを-STAオプション付きで起動してください。'
+    }
+
+    Add-Type -AssemblyName System.Windows.Forms
+    $dialog = [Windows.Forms.FolderBrowserDialog]::new()
+    try {
+        $dialog.Description = 'Media Normalizerを保存する既存の親フォルダーを選択してください。プロジェクトルート以外を選択すると、その中に MediaNormalizerBuilds フォルダーを作成します。'
+        $dialog.UseDescriptionForTitle = $false
+        $dialog.AutoUpgradeEnabled = $true
+        $dialog.ShowNewFolderButton = $true
+        $dialog.SelectedPath = $InitialDirectory
+        $result = $dialog.ShowDialog()
+        if ($result -ne [Windows.Forms.DialogResult]::OK -or
+            [string]::IsNullOrWhiteSpace($dialog.SelectedPath)) {
+            Write-Host '保存先の選択がキャンセルされました。ファイルは生成していません。' -ForegroundColor Yellow
+            exit 3
+        }
+        return $dialog.SelectedPath
+    }
+    finally {
+        $dialog.Dispose()
+    }
+}
+
+function Copy-BuildInputs {
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [Parameter(Mandatory)][string]$StagingDirectory,
+        [Parameter(Mandatory)][string]$StagingRoot
+    )
+
+    $entries = @(
+        [pscustomobject]@{
+            SourceRelativePath = 'scripts\package-templates\media-normalizer.bat'
+            DestinationRelativePath = 'media-normalizer.bat'
+            PathType = 'Leaf'
+        }
+        [pscustomobject]@{
+            SourceRelativePath = 'media-normalizer.ps1'
+            DestinationRelativePath = 'media-normalizer.ps1'
+            PathType = 'Leaf'
+        }
+        [pscustomobject]@{
+            SourceRelativePath = 'diagnostics\diagnose.bat'
+            DestinationRelativePath = 'diagnose.bat'
+            PathType = 'Leaf'
+        }
+        [pscustomobject]@{
+            SourceRelativePath = 'diagnostics\diagnose.ps1'
+            DestinationRelativePath = 'diagnose.ps1'
+            PathType = 'Leaf'
+        }
+        [pscustomobject]@{
+            SourceRelativePath = 'launcher-legacy\runtime-env.bat'
+            DestinationRelativePath = 'runtime-env.bat'
+            PathType = 'Leaf'
+        }
+        [pscustomobject]@{
+            SourceRelativePath = 'diagnostics\runtime-check.bat'
+            DestinationRelativePath = 'runtime-check.bat'
+            PathType = 'Leaf'
+        }
+        [pscustomobject]@{
+            SourceRelativePath = 'diagnostics\runtime-check.ps1'
+            DestinationRelativePath = 'runtime-check.ps1'
+            PathType = 'Leaf'
+        }
+        [pscustomobject]@{
+            SourceRelativePath = 'THIRD-PARTY-NOTICES.md'
+            DestinationRelativePath = 'THIRD-PARTY-NOTICES.md'
+            PathType = 'Leaf'
+        }
+        [pscustomobject]@{
+            SourceRelativePath = 'README.md'
+            DestinationRelativePath = 'README.md'
+            PathType = 'Leaf'
+        }
+        [pscustomobject]@{
+            SourceRelativePath = 'assets'
+            DestinationRelativePath = 'assets'
+            PathType = 'Container'
+        }
+        [pscustomobject]@{
+            SourceRelativePath = 'docs'
+            DestinationRelativePath = 'docs'
+            PathType = 'Container'
+        }
+        [pscustomobject]@{
+            SourceRelativePath = 'lib'
+            DestinationRelativePath = 'lib'
+            PathType = 'Container'
+        }
+    )
+
+    New-Item -ItemType Directory -Path $StagingDirectory -Force | Out-Null
+    foreach ($entry in $entries) {
+        $source = Assert-PathWithinRoot `
+            -Path (Join-Path $ProjectRoot $entry.SourceRelativePath) `
+            -Root $ProjectRoot
+        if (-not (Test-Path -LiteralPath $source -PathType $entry.PathType)) {
+            throw "Required build input is missing: $source"
+        }
+        if ((Get-Item -LiteralPath $source -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "Build input cannot be a symbolic link or junction: $source"
+        }
+        if ($entry.PathType -eq 'Container') {
+            $nestedReparsePoint = Get-ChildItem -LiteralPath $source -Recurse -Force |
+                Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint } |
+                Select-Object -First 1
+            if ($null -ne $nestedReparsePoint) {
+                throw "Build input cannot contain a symbolic link or junction: $($nestedReparsePoint.FullName)"
+            }
+        }
+
+        $destination = Assert-PathWithinRoot `
+            -Path (Join-Path $StagingDirectory $entry.DestinationRelativePath) `
+            -Root $StagingRoot
+        Copy-Item -LiteralPath $source -Destination $destination -Recurse -Force
+    }
+}
+
+function Copy-PreparedRuntime {
+    param(
+        [Parameter(Mandatory)][string]$SourceRoot,
+        [Parameter(Mandatory)][string]$PackageRoot,
+        [Parameter(Mandatory)][ValidateSet('win-x64', 'win-arm64')][string]$Runtime,
+        [Parameter(Mandatory)][string]$LockedDependencyManifest
+    )
+
+    $sourceFull = [IO.Path]::GetFullPath($SourceRoot)
+    $manifestPath = Join-Path $sourceFull 'dependency-manifest.json'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        $nestedRuntime = Join-Path $sourceFull 'runtime'
+        if (Test-Path -LiteralPath (Join-Path $nestedRuntime 'dependency-manifest.json') -PathType Leaf) {
+            $sourceFull = $nestedRuntime
+            $manifestPath = Join-Path $sourceFull 'dependency-manifest.json'
+        }
+    }
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        throw "Prepared runtime manifest was not found: $SourceRoot"
+    }
+    if ((Get-Item -LiteralPath $sourceFull -Force).Attributes -band
+        [IO.FileAttributes]::ReparsePoint) {
+        throw "Prepared runtime cannot be a symbolic link or junction: $sourceFull"
+    }
+    $reparsePoint = Get-ChildItem -LiteralPath $sourceFull -Recurse -Force |
+        Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint } |
+        Select-Object -First 1
+    if ($null -ne $reparsePoint) {
+        throw "Prepared runtime cannot contain a symbolic link or junction: $($reparsePoint.FullName)"
+    }
+
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 |
+        ConvertFrom-Json -ErrorAction Stop
+    if ([int]$manifest.schemaVersion -ne 1 -or [string]$manifest.runtime -ne $Runtime) {
+        throw "Prepared runtime manifest does not match $Runtime."
+    }
+
+    $lockedManifestPath = [IO.Path]::GetFullPath($LockedDependencyManifest)
+    if (-not (Test-Path -LiteralPath $lockedManifestPath -PathType Leaf)) {
+        throw "Locked dependency manifest was not found: $lockedManifestPath"
+    }
+    $locked = Get-Content -LiteralPath $lockedManifestPath -Raw -Encoding UTF8 |
+        ConvertFrom-Json -ErrorAction Stop
+    if ([int]$locked.schemaVersion -ne 1) {
+        throw "Locked dependency manifest schema is not supported: $lockedManifestPath"
+    }
+    $lockedFfmpegRuntime = $locked.ffmpeg.runtimes.PSObject.Properties[$Runtime].Value
+    $lockedPythonRuntime = $locked.python.runtimes.PSObject.Properties[$Runtime].Value
+    $lockedNormalize = @($locked.pythonPackages |
+            Where-Object name -eq 'ffmpeg-normalize' |
+            Select-Object -First 1)
+    if ($null -eq $lockedFfmpegRuntime -or
+        $null -eq $lockedPythonRuntime -or
+        $lockedNormalize.Count -ne 1) {
+        throw "Locked dependency manifest does not define $Runtime completely."
+    }
+    if ([string]$manifest.ffmpeg.version -ne [string]$locked.ffmpeg.version -or
+        [string]$manifest.ffmpeg.binarySha256 -ine [string]$lockedFfmpegRuntime.sha256 -or
+        [string]$manifest.python.version -ne [string]$locked.python.version -or
+        [string]$manifest.python.binarySha256 -ine [string]$lockedPythonRuntime.sha256 -or
+        [string]$manifest.ffmpegNormalize.version -ne [string]$lockedNormalize[0].version) {
+        throw "Prepared runtime versions do not match the locked dependencies for $Runtime."
+    }
+    foreach ($lockedPackage in $locked.pythonPackages) {
+        $preparedPackage = @($manifest.pythonPackages |
+                Where-Object name -eq $lockedPackage.name |
+                Select-Object -First 1)
+        if ($preparedPackage.Count -ne 1 -or
+            [string]$preparedPackage[0].version -ne [string]$lockedPackage.version -or
+            [string]$preparedPackage[0].sha256 -ine [string]$lockedPackage.sha256) {
+            throw "Prepared runtime Python package does not match the lock: $($lockedPackage.name)"
+        }
+    }
+
+    foreach ($fileEntry in $manifest.criticalFiles) {
+        $filePath = Assert-PathWithinRoot `
+            -Path (Join-Path $sourceFull ([string]$fileEntry.path)) `
+            -Root $sourceFull
+        if (-not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+            throw "Prepared runtime is missing a critical file: $filePath"
+        }
+        $actualHash = (Get-FileHash -LiteralPath $filePath -Algorithm SHA256).Hash
+        if ($actualHash -ine [string]$fileEntry.sha256) {
+            throw "Prepared runtime hash mismatch: $filePath"
+        }
+    }
+
+    $expectedMachine = if ($Runtime -eq 'win-arm64') { 0xAA64 } else { 0x8664 }
+    foreach ($relativePath in @(
+            'ffmpeg\bin\ffmpeg.exe',
+            'ffmpeg\bin\ffprobe.exe',
+            'python\python.exe')) {
+        $pePath = Assert-PathWithinRoot `
+            -Path (Join-Path $sourceFull $relativePath) `
+            -Root $sourceFull
+        $actualMachine = Get-PeMachine -Path $pePath
+        if ($actualMachine -ne $expectedMachine) {
+            throw ('Prepared runtime architecture mismatch. Expected 0x{0:X4}, actual 0x{1:X4}: {2}' -f
+                $expectedMachine, $actualMachine, $pePath)
+        }
+    }
+
+    $destination = Assert-PathWithinRoot `
+        -Path (Join-Path $PackageRoot 'runtime') `
+        -Root $PackageRoot
+    Copy-Item -LiteralPath $sourceFull -Destination $destination -Recurse -Force
+}
+
+$projectRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
+$lockedDependencyManifest = Assert-PathWithinRoot `
+    -Path (Join-Path $projectRoot 'portable-dependencies.json') `
+    -Root $projectRoot
+$buildPathsScript = Assert-PathWithinRoot `
+    -Path (Join-Path $PSScriptRoot 'resolve-media-normalizer-build-paths.ps1') `
+    -Root $projectRoot
+. $buildPathsScript
+
+if ($SelectOutputRoot -and [string]::IsNullOrWhiteSpace($OutputRoot)) {
+    $OutputRoot = Select-OutputRootFolder -InitialDirectory $projectRoot
+}
+if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
+    $OutputRoot = $projectRoot
+}
+
+foreach ($path in @($projectRoot, $OutputRoot, $PreparedRuntimeRoot)) {
+    if (-not [string]::IsNullOrWhiteSpace($path) -and
+        (Test-SecretFilePath -FilePath $path)) {
+        throw "MEDIA_NORMALIZER_SECRET_PATH_REJECTED: $path"
+    }
+}
+
+$requestedOutputRoot = if ([IO.Path]::IsPathFullyQualified($OutputRoot)) {
+    $OutputRoot
+}
+else {
+    Join-Path $projectRoot $OutputRoot
+}
+$resolvedOutputRoot = Assert-MediaNormalizerOutputParent -Path $requestedOutputRoot
+$buildPaths = Resolve-MediaNormalizerBuildPaths `
+    -ProjectRoot $projectRoot `
+    -OutputRoot $resolvedOutputRoot
+
+$managedRootLeaf = if ($buildPaths.UsesExternalRoot) { 'MediaNormalizerBuilds' } else { 'artifacts' }
+$managedRoot = Assert-ManagedDirectory `
+    -Path $buildPaths.ManagedRoot `
+    -Root $resolvedOutputRoot `
+    -ExpectedLeaf $managedRootLeaf
+$outputName = "media-normalizer-$Runtime"
+$outputDirectory = Assert-ManagedDirectory `
+    -Path (Join-Path $managedRoot $outputName) `
+    -Root $managedRoot `
+    -ExpectedLeaf $outputName
+
+$mutexHash = [Convert]::ToHexString(
+    [Security.Cryptography.SHA256]::HashData(
+        [Text.Encoding]::UTF8.GetBytes($projectRoot.ToUpperInvariant()))).Substring(0, 16)
+$temporaryRoot = ConvertTo-GuardedDirectoryPath -Path ([IO.Path]::GetTempPath())
+$stagingParentName = "MediaNormalizerStaging-$mutexHash"
+$stagingParent = Assert-ManagedDirectory `
+    -Path (Join-Path $temporaryRoot $stagingParentName) `
+    -Root $temporaryRoot `
+    -ExpectedLeaf $stagingParentName
+$stagingManagedRoot = Assert-ManagedDirectory `
+    -Path (Join-Path $stagingParent 'MediaNormalizerBuilds') `
+    -Root $stagingParent `
+    -ExpectedLeaf 'MediaNormalizerBuilds'
+$stagingName = ".staging-media-normalizer-$Runtime-$([guid]::NewGuid().ToString('N'))"
+$stagingDirectory = Assert-ManagedDirectory `
+    -Path (Join-Path $stagingManagedRoot $stagingName) `
+    -Root $stagingManagedRoot `
+    -ExpectedLeaf $stagingName
+
+$backupName = ".rollback-media-normalizer-$Runtime"
+$backupRoot = Assert-ManagedDirectory `
+    -Path $managedRoot `
+    -Root $resolvedOutputRoot `
+    -ExpectedLeaf $managedRootLeaf
+$backupDirectory = Assert-ManagedDirectory `
+    -Path (Join-Path $backupRoot $backupName) `
+    -Root $backupRoot `
+    -ExpectedLeaf $backupName
+
+$updateMutex = [Threading.Mutex]::new($false, "Local\MediaNormalizer-Rebuild-$mutexHash")
+$updateLockTaken = $false
+$backupPrepared = $false
+$outputExisted = Test-Path -LiteralPath $outputDirectory
+$outputZip = Assert-PathWithinRoot `
+    -Path (Join-Path $managedRoot "$outputName.zip") `
+    -Root $managedRoot
+$outputChecksum = Assert-PathWithinRoot `
+    -Path (Join-Path $managedRoot "$outputName.zip.sha256") `
+    -Root $managedRoot
+$stagingZip = Assert-PathWithinRoot `
+    -Path (Join-Path $stagingManagedRoot "$stagingName.zip") `
+    -Root $stagingManagedRoot
+
+try {
+    try {
+        $updateLockTaken = $updateMutex.WaitOne(0)
+    }
+    catch [Threading.AbandonedMutexException] {
+        $updateLockTaken = $true
+    }
+    if (-not $updateLockTaken) {
+        throw 'Another Media Normalizer rebuild is already running. Wait for it to finish, then try again.'
+    }
+
+    New-Item -ItemType Directory -Path $managedRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $stagingManagedRoot -Force | Out-Null
+
+    Write-Host "Output parent: $resolvedOutputRoot" -ForegroundColor Cyan
+    Write-Host "Managed output: $managedRoot" -ForegroundColor Cyan
+    Write-Host "Architecture: $Runtime portable package." -ForegroundColor Cyan
+    if ($CleanBuild) {
+        Write-Host (
+            'Build mode: complete clean build. Existing runtimes and the shared ' +
+            'dependency cache will not be used.'
+        ) -ForegroundColor Magenta
+    }
+    else {
+        Write-Host 'Build mode: safe rebuild with verified runtime reuse.' `
+            -ForegroundColor DarkCyan
+    }
+    Write-Host "The managed $outputName directory will be replaced only after staging succeeds." -ForegroundColor Yellow
+
+    Copy-BuildInputs `
+        -ProjectRoot $projectRoot `
+        -StagingDirectory $stagingDirectory `
+        -StagingRoot $stagingManagedRoot
+
+    $runtimePrepared = $false
+    if (-not $CleanBuild -and
+        [string]::IsNullOrWhiteSpace($PreparedRuntimeRoot)) {
+        $runtimeCandidates = [Collections.Generic.List[string]]::new()
+        $runtimeCandidateSet = [Collections.Generic.HashSet[string]]::new(
+            [StringComparer]::OrdinalIgnoreCase)
+        foreach ($candidate in @(
+                (Join-Path $outputDirectory 'runtime'),
+                (Join-Path $projectRoot "artifacts\$outputName\runtime"))) {
+            $candidateFull = [IO.Path]::GetFullPath($candidate)
+            if ($runtimeCandidateSet.Add($candidateFull) -and
+                (Test-Path -LiteralPath (
+                        Join-Path $candidateFull 'dependency-manifest.json'
+                    ) -PathType Leaf)) {
+                $runtimeCandidates.Add($candidateFull)
+            }
+        }
+        foreach ($candidate in $runtimeCandidates) {
+            try {
+                Copy-PreparedRuntime `
+                    -SourceRoot $candidate `
+                    -PackageRoot $stagingDirectory `
+                    -Runtime $Runtime `
+                    -LockedDependencyManifest $lockedDependencyManifest
+                Write-Host "Using verified existing runtime: $candidate" -ForegroundColor DarkCyan
+                $runtimePrepared = $true
+                break
+            }
+            catch {
+                if (Test-Path -LiteralPath (Join-Path $stagingDirectory 'runtime')) {
+                    throw
+                }
+                Write-Host (
+                    "Existing runtime cannot be reused: $candidate`n" +
+                    "  $($_.Exception.Message)") -ForegroundColor Yellow
+            }
+        }
+    }
+
+    if (-not $runtimePrepared -and
+        [string]::IsNullOrWhiteSpace($PreparedRuntimeRoot)) {
+        $prepareRuntimeScript = Assert-PathWithinRoot `
+            -Path (Join-Path $PSScriptRoot 'prepare-portable-runtime.ps1') `
+            -Root $projectRoot
+        $dependencyCache = if ($CleanBuild) {
+            Assert-ManagedDirectory `
+                -Path (Join-Path $stagingDirectory '.clean-dependency-cache') `
+                -Root $stagingDirectory `
+                -ExpectedLeaf '.clean-dependency-cache'
+        }
+        else {
+            Assert-PathWithinRoot `
+                -Path (Join-Path $projectRoot '.work\portable-cache') `
+                -Root $projectRoot
+        }
+        if ($CleanBuild) {
+            Write-Host (
+                'Preparing runtime from an isolated empty dependency cache: ' +
+                $dependencyCache
+            ) -ForegroundColor Magenta
+        }
+        & $prepareRuntimeScript `
+            -Runtime $Runtime `
+            -PackageRoot $stagingDirectory `
+            -CacheRoot $dependencyCache `
+            -DownloadTimeoutSeconds $DownloadTimeoutSeconds `
+            -DownloadRetryCount $DownloadRetryCount
+        $runtimePrepared = $true
+        if ($CleanBuild -and (Test-Path -LiteralPath $dependencyCache)) {
+            $safeCleanCache = Assert-ManagedDirectory `
+                -Path $dependencyCache `
+                -Root $stagingDirectory `
+                -ExpectedLeaf '.clean-dependency-cache'
+            Remove-Item -LiteralPath $safeCleanCache -Recurse -Force
+            Write-Host 'Removed isolated clean-build dependency cache.' `
+                -ForegroundColor DarkCyan
+        }
+    }
+    elseif (-not $runtimePrepared) {
+        Copy-PreparedRuntime `
+            -SourceRoot $PreparedRuntimeRoot `
+            -PackageRoot $stagingDirectory `
+            -Runtime $Runtime `
+            -LockedDependencyManifest $lockedDependencyManifest
+        $runtimePrepared = $true
+    }
+
+    $portableMarker = Assert-PathWithinRoot `
+        -Path (Join-Path $stagingDirectory 'portable-package.marker') `
+        -Root $stagingDirectory
+    [IO.File]::WriteAllText(
+        $portableMarker,
+        "media-normalizer-portable`r`n",
+        [Text.UTF8Encoding]::new($false))
+
+    $requiredFilesDefinitionPath = Join-Path $PSScriptRoot 'media-normalizer-required-files.psd1'
+    $requiredFilesDefinition = Import-PowerShellDataFile -LiteralPath $requiredFilesDefinitionPath
+    foreach ($requiredRelativePath in $requiredFilesDefinition.RequiredRelativePaths) {
+        $requiredPath = Assert-PathWithinRoot `
+            -Path (Join-Path $stagingDirectory $requiredRelativePath) `
+            -Root $stagingDirectory
+        if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+            throw "Staged package is incomplete: $requiredPath"
+        }
+    }
+
+    $stagingDigest = Get-DirectoryDigest `
+        -Path $stagingDirectory `
+        -AllowedRoot $stagingManagedRoot
+
+    Write-Host "Creating portable ZIP: $outputName.zip" -ForegroundColor Cyan
+    Compress-Archive `
+        -Path (Join-Path $stagingDirectory '*') `
+        -DestinationPath $stagingZip `
+        -CompressionLevel Optimal
+    $stagingZipHash = (Get-FileHash -LiteralPath $stagingZip -Algorithm SHA256).Hash
+
+    if ($outputExisted) {
+        Clear-DirectoryContents -Path $backupDirectory -AllowedRoot $backupRoot
+        Copy-DirectoryContents `
+            -Source $outputDirectory `
+            -Destination $backupDirectory `
+            -SourceRoot $managedRoot `
+            -DestinationRoot $backupRoot
+        if ((Get-DirectoryDigest -Path $backupDirectory -AllowedRoot $backupRoot) -ne
+            (Get-DirectoryDigest -Path $outputDirectory -AllowedRoot $managedRoot)) {
+            throw 'Backup verification failed before updating the current build.'
+        }
+        $backupPrepared = $true
+    }
+
+    try {
+        Sync-DirectoryContents `
+            -Source $stagingDirectory `
+            -Destination $outputDirectory `
+            -SourceRoot $stagingManagedRoot `
+            -DestinationRoot $managedRoot
+        if ((Get-DirectoryDigest -Path $outputDirectory -AllowedRoot $managedRoot) -ne
+            $stagingDigest) {
+            throw 'Package verification failed after copying the staged build.'
+        }
+        Copy-Item -LiteralPath $stagingZip -Destination $outputZip -Force
+        if ((Get-FileHash -LiteralPath $outputZip -Algorithm SHA256).Hash -ne
+            $stagingZipHash) {
+            throw 'Portable ZIP verification failed after copying the staged archive.'
+        }
+        "$($stagingZipHash.ToLowerInvariant())  $outputName.zip" |
+            Set-Content -LiteralPath $outputChecksum -Encoding ascii
+        & (Join-Path $PSScriptRoot 'test-artifact-integrity.ps1') `
+            -Runtime $Runtime `
+            -ArtifactsRoot $managedRoot `
+            -RequiredFilesManifest $requiredFilesDefinitionPath
+    }
+    catch {
+        if ($backupPrepared) {
+            Sync-DirectoryContents `
+                -Source $backupDirectory `
+                -Destination $outputDirectory `
+                -SourceRoot $backupRoot `
+                -DestinationRoot $managedRoot
+        }
+        elseif (-not $outputExisted -and (Test-Path -LiteralPath $outputDirectory)) {
+            $safePartialOutput = Assert-ManagedDirectory `
+                -Path $outputDirectory `
+                -Root $managedRoot `
+                -ExpectedLeaf $outputName
+            Remove-Item -LiteralPath $safePartialOutput -Recurse -Force
+        }
+        throw
+    }
+
+    Write-Host "Updated portable build: $outputDirectory" -ForegroundColor Green
+    Write-Host "Launcher: $(Join-Path $outputDirectory 'media-normalizer.bat')" -ForegroundColor Green
+    Write-Host "ZIP: $outputZip" -ForegroundColor Green
+    Write-Host "SHA-256: $($stagingZipHash.ToLowerInvariant())" -ForegroundColor Green
+    if ($backupPrepared) {
+        Write-Host "Previous build retained for rollback: $backupDirectory" -ForegroundColor Yellow
+    }
+}
+finally {
+    if (Test-Path -LiteralPath $stagingDirectory) {
+        $safeStaging = Assert-ManagedDirectory `
+            -Path $stagingDirectory `
+            -Root $stagingManagedRoot `
+            -ExpectedLeaf $stagingName
+        Remove-Item -LiteralPath $safeStaging -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $stagingZip) {
+        $safeStagingZip = Assert-PathWithinRoot -Path $stagingZip -Root $stagingManagedRoot
+        Remove-Item -LiteralPath $safeStagingZip -Force
+    }
+    if ($updateLockTaken) {
+        $updateMutex.ReleaseMutex()
+    }
+    $updateMutex.Dispose()
+}
