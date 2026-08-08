@@ -141,20 +141,22 @@ Integrated Loudness（目標LUFS）は`-70.0`〜`-5.0`、True Peakは`-9.0`〜`0
 
 ## 導入・安全再ビルド
 
-利用者向けのビルド入口は、プロジェクトルートの
-`rebuild-media-normalizer.bat`だけです。このバッチが実行中のWindowsを判定し、
+このリポジトリからビルドする場合の入口は
+`scripts\rebuild-media-normalizer.bat`だけです。このバッチが実行中のWindowsを判定し、
 x64またはARM64の適切な配布物を生成します。
 
 引数なしでダブルクリックすると、保存先の親フォルダーを選択できます。
-プロジェクトルートを選ぶと
+リポジトリルートを選ぶと
 `artifacts/media-normalizer-win-<runtime>/`へ生成します。別の親フォルダーを
 選ぶと、`<選択先>/MediaNormalizerBuilds/media-normalizer-win-<runtime>/`へ
 生成します。単一の既存フォルダーをバッチへドラッグ＆ドロップして指定する
 こともできます。ファイル、存在しないパス、複数パスはビルド前に拒否します。
 
 ビルドはアプリを自動起動しません。完了後、生成されたフォルダー内の
-`media-normalizer.bat`を実行してください。アーキテクチャを固定する補助BATは
-開発・クロスビルド用として`scripts/`内に置き、通常の導線には使用しません。
+`media-normalizer.bat`を実行してください。アーキテクチャを固定する補助BAT
+（`scripts\rebuild-media-normalizer-x64.bat`と
+`scripts\rebuild-media-normalizer-arm64.bat`）は開発・クロスビルド検証用であり、
+通常の導線には使用しません。
 
 各ZIPと同名の`.zip.sha256`に公開用のSHA-256チェックサムが出力されます。
 既存の同一バージョン・同一アーキテクチャ配布物がある場合は、manifest、
@@ -165,8 +167,8 @@ SHA-256、PEアーキテクチャを再検証して同梱ランタイムを再�
 検証する場合は、同じ入口へ`--clean`を指定します。
 
 ```bat
-rebuild-media-normalizer.bat --clean
-rebuild-media-normalizer.bat --clean "C:\BuildOutput"
+scripts\rebuild-media-normalizer.bat --clean
+scripts\rebuild-media-normalizer.bat --clean "C:\BuildOutput"
 ```
 
 1つ目は保存先選択画面を表示し、2つ目は指定した既存フォルダーの直下に
@@ -188,6 +190,35 @@ SHA-256、バージョン、必要なFFmpeg機能を検証します。
 
 依存バージョンと取得元は `portable-dependencies.json`、再配布上の注意は
 `THIRD-PARTY-NOTICES.md` と `docs/PORTABLE-DISTRIBUTION.md` を参照してください。
+
+## インストーラーパッケージの生成
+
+`installer/Install-MediaNormalizer.ps1` は、`installer/payload/` に置かれた配布ZIPと
+`payload-manifest.json` を前提に動作します。このpayloadは生成物のため、リポジトリには
+含まれていません。cloneした状態から導入する場合は、先に次を実行してください。
+
+```powershell
+pwsh -File .\scripts\build-media-normalizer-installer-package.ps1
+```
+
+x64とARM64の配布物を再ビルドし、`installer/payload/` へZIPと、SHA-256・PE
+アーキテクチャ・管理対象ファイル一覧を含む `payload-manifest.json` を出力します。
+ビルド済み配布物を再利用する場合は `-SkipPortableRebuild`、片方のアーキテクチャだけ
+生成する場合は `-Runtime win-x64` のように指定します。
+
+生成後は次で導入・更新を実行します（インストール先の親フォルダーを画面で選択します）。
+
+```powershell
+powershell.exe -STA -NoProfile -ExecutionPolicy Bypass `
+  -File .\installer\Install-MediaNormalizer.ps1 -SelectOutputRoot
+```
+
+payloadが未生成のまま実行した場合は、manifest欠落として
+`MEDIA_NORMALIZER_INSTALLER:MANIFEST_INVALID`を表示して停止します。manifestに記載された
+対応ZIPだけが欠ける場合は`MEDIA_NORMALIZER_INSTALLER:PAYLOAD_ARCHIVE_MISSING`で停止します。
+配布パッケージに同梱される利用者向けの入口BATは配布側のレイアウトに属し、
+このリポジトリには含まれません。インストーラーの信頼境界と更新順序は
+`installer/README.md` と `docs/installer-architecture.md` を参照してください。
 
 ## 公開前の注意
 
@@ -213,6 +244,10 @@ version、SHA-256、必要機能を検証します。
 Windows x64用とWindows ARM64用を分けて提供し、展開後はフォルダー全体を保持して
 `media-normalizer.bat`を実行します。
 
+配布ZIPとinstaller payloadはいずれも生成物のため、このリポジトリには含まれません。
+sourceから導入する場合は[導入・安全再ビルド](#導入安全再ビルド)または
+[インストーラーパッケージの生成](#インストーラーパッケージの生成)を実行してください。
+
 ## Usage
 
 GUI操作は[GUIの使い方](#guiの使い方)、自動処理や検証用途は[CLI](#cli)を参照して
@@ -221,9 +256,10 @@ GUI操作は[GUIの使い方](#guiの使い方)、自動処理や検証用途は
 
 ## Development
 
-再現可能なportable buildは[導入・安全再ビルド](#導入安全再ビルド)に従います。
-依存versionとSHA-256は`portable-dependencies.json`で固定されています。公開候補の
-生成物、テスト結果、ローカル設定、ログはsource repositoryへ含めません。
+再現可能なportable buildは[導入・安全再ビルド](#導入安全再ビルド)に従います。ビルド
+入口とビルド補助scriptはすべて`scripts/`配下にあり、リポジトリルートに実行用BATは
+置きません。依存versionとSHA-256は`portable-dependencies.json`で固定されています。
+公開候補の生成物、テスト結果、ローカル設定、ログはsource repositoryへ含めません。
 
 ## Configuration
 
