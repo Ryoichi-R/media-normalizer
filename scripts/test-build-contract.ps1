@@ -135,6 +135,7 @@ try {
         Join-Path $PSScriptRoot 'rebuild-media-normalizer-arm64.bat') -Raw
     $applicationBatch = Get-Content -LiteralPath (
         Join-Path $PSScriptRoot 'package-templates\media-normalizer.bat') -Raw
+    $readme = Get-Content -LiteralPath (Join-Path $projectRoot 'README.md') -Raw
     $uiModule = Get-Content -LiteralPath (
         Join-Path $projectRoot 'lib\MediaNormalizer.Ui.psm1') -Raw
     Assert-Contract (
@@ -173,6 +174,34 @@ try {
         -not [regex]::IsMatch($applicationBatch, '(?im)^\s*chcp\b') -and
         $applicationBatch.Contains('"%~dp0MediaNormalizer.exe" %*', [StringComparison]::Ordinal)
     ) 'Application launcher must preserve the console code page and quote its executable path.'
+    Assert-Contract (
+        $readme.Contains('動画正規化の入力: MP4 / MOV / MKV', [StringComparison]::Ordinal) -and
+        $readme.Contains('AVIは動画正規化には対応せず、音声抽出のみ', [StringComparison]::Ordinal) -and
+        $readme.Contains('AIFF（`.aif` / `.aiff`）', [StringComparison]::Ordinal)
+    ) 'README must distinguish video normalization inputs from audio extraction inputs.'
+    Assert-Contract (
+        $readme.Contains('Windows PowerShell 5.1またはPowerShell 7', [StringComparison]::Ordinal) -and
+        $readme.Contains('sourceからの再ビルドと依存物の取得にはPowerShell 7', [StringComparison]::Ordinal) -and
+        $readme.Contains('Windows PowerShell 5.1ではGUIの非同期プローブにThreadJobモジュールが必要', [StringComparison]::Ordinal) -and
+        $readme.Contains('Install-Module ThreadJob -Scope CurrentUser', [StringComparison]::Ordinal)
+    ) 'README must distinguish the PowerShell runtime requirement from the rebuild requirement.'
+    Assert-Contract (
+        $readme.IndexOf('## 主な機能', [StringComparison]::Ordinal) -lt
+        $readme.IndexOf('## 動作要件', [StringComparison]::Ordinal)
+    ) 'README must place the main feature overview before environment requirements.'
+    Assert-Contract (
+        $readme.Contains('-InputDir <フォルダ>', [StringComparison]::Ordinal) -and
+        $readme.Contains('-SpeedPercent 50..200', [StringComparison]::Ordinal)
+    ) 'README must document the CLI folder and playback-speed options.'
+    Assert-Contract (
+        $readme.Contains('scripts/package-templates/media-normalizer.bat', [StringComparison]::Ordinal) -and
+        $readme.Contains('ビルド時に配布物ルートへ生成します', [StringComparison]::Ordinal)
+    ) 'README must explain how the distribution BAT is generated from its repository template.'
+    $requiredPortableFiles = Import-PowerShellDataFile -LiteralPath (
+        Join-Path $projectRoot 'scripts\media-normalizer-required-files.psd1')
+    Assert-Contract (
+        @($requiredPortableFiles.RequiredRelativePaths) -contains 'MediaNormalizer.exe'
+    ) 'Portable package must require MediaNormalizer.exe.'
     Assert-Contract (
         $uiModule.Contains(
             'Export-ModuleMember -Function Initialize-UiState, New-MainForm, Set-ConsoleWindowHidden, Show-MainForm',
@@ -217,6 +246,11 @@ try {
     $rebuild = Get-Content `
         -LiteralPath (Join-Path $PSScriptRoot 'rebuild-media-normalizer.ps1') `
         -Raw
+    Assert-Contract (
+        $rebuild.Contains('Publish-Launcher', [StringComparison]::Ordinal) -and
+        $rebuild.Contains('-p:PublishSingleFile=true', [StringComparison]::Ordinal) -and
+        $rebuild.Contains('--self-contained true', [StringComparison]::Ordinal)
+    ) 'Portable rebuild must publish a self-contained single-file launcher.'
     Assert-Contract (
         $rebuild.Contains(
             "SourceRelativePath = 'scripts\package-templates\media-normalizer.bat'",
@@ -335,6 +369,14 @@ try {
             '-Runtime $rid -OutputRoot $project',
             [StringComparison]::Ordinal)
     ) 'Installer package rebuild must use the canonical portable rebuild contract.'
+    Assert-Contract (
+        $installerBuilder.Contains(
+            'Join-Path $package ''MediaNormalizer.exe''',
+            [StringComparison]::Ordinal) -and
+        -not $installerBuilder.Contains(
+            'artifacts\launcher\$rid\MediaNormalizer.exe',
+            [StringComparison]::OrdinalIgnoreCase)
+    ) 'Installer package rebuild must consume the launcher from the canonical portable package.'
 
     $prepareRuntime = Get-Content `
         -LiteralPath (Join-Path $PSScriptRoot 'prepare-portable-runtime.ps1') `
@@ -375,8 +417,13 @@ try {
         [int]$dependencies.schemaVersion -eq 1
     ) 'Portable dependency manifest schema must be version 1.'
     Assert-Contract (
-        [string]$dependencies.ffmpeg.version -eq '8.1.2-31-g8c9502e9b0'
+        [string]$dependencies.ffmpeg.version -eq '8.1.2-34-g9b6c8969e0'
     ) 'FFmpeg must remain pinned to the reviewed build.'
+    Assert-Contract (
+        [string]$dependencies.ffmpeg.releaseRetention -eq
+            'monthly-last-build-two-years' -and
+        [string]$dependencies.ffmpeg.release -eq 'autobuild-2026-07-31-14-10'
+    ) 'FFmpeg must use a reviewed BtbN monthly build with two-year retention.'
     Assert-Contract (
         [string]$dependencies.python.version -eq '3.13.14'
     ) 'Python must remain pinned to the reviewed embeddable release.'

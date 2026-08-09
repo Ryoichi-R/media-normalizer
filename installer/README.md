@@ -1,8 +1,9 @@
 # Media Normalizer installer
 
 `Install-MediaNormalizer.ps1`はWindows PowerShell 5.1対応の導入・更新処理です。
-配布パッケージでは同梱の入口BATから実行します。その入口BATは配布側のレイアウトに
-属し、このリポジトリには含まれません。
+配布パッケージでは、`scripts/package-templates/media-normalizer.bat`をビルド時に
+配布物ルートへ生成した同梱入口BATから実行します。テンプレートはこのリポジトリに
+含まれます。
 
 リポジトリから直接実行する場合は、先に`scripts/build-media-normalizer-installer-package.ps1`で
 `installer/payload/`（配布ZIPと`payload-manifest.json`）を生成してから、リポジトリ

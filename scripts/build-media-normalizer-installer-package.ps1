@@ -27,7 +27,6 @@ foreach ($rid in $Runtime) {
     }
 
     $package = Join-Path $project "artifacts\media-normalizer-$rid"
-    $launcher = Join-Path $project "artifacts\launcher\$rid\MediaNormalizer.exe"
     if (-not (Test-Path -LiteralPath $package -PathType Container)) {
         throw "Canonical portable package was not found: $package"
     }
@@ -39,10 +38,10 @@ foreach ($rid in $Runtime) {
         -Destination (Join-Path $package 'lib') -Recurse -Force
     Copy-Item -Path (Join-Path $project 'assets\*') `
         -Destination (Join-Path $package 'assets') -Recurse -Force
+    $launcher = Join-Path $package 'MediaNormalizer.exe'
     if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) {
-        throw "Launcher publish was not found: $launcher"
+        throw "Canonical portable package launcher was not found: $launcher"
     }
-    Copy-Item -LiteralPath $launcher -Destination (Join-Path $package 'MediaNormalizer.exe') -Force
 
     $archiveName = "MediaNormalizer-$rid.zip"
     $archive = Join-Path $payloadRoot $archiveName

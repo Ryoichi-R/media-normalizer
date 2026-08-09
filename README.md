@@ -1,19 +1,45 @@
 # Media Normalizer
 
-Windows向けの自己完結型ポータブルアプリです。配布ZIPには、動作に必要な
-FFmpeg、ffprobe、Python、ffmpeg-normalizeが含まれています。利用者がこれらを
-別途インストールしたり、`PATH`を設定したりする必要はありません。
+## 概要
+
+Media Normalizerは、Windows上で音声・動画のラウドネス、音声形式、再生速度を
+一括調整するPowerShell製ツールです。GUIとCLIを備え、portable packageでは固定済みの
+FFmpegとPython runtimeを使用します。配布ZIPには動作に必要なruntimeが含まれるため、
+利用者がFFmpeg、ffprobe、Pythonを別途インストールしたり、`PATH`を設定したりする
+必要はありません。
+
+## 目次
+
+- [概要](#概要)
+- [主な機能](#主な機能)
+- [動作要件](#動作要件)
+- [インストール](#インストール)
+- [使用方法](#使用方法)
+- [CLI](#cli)
+- [ラウドネス目標値の範囲](#ラウドネス目標値の範囲)
+- [プリセットについて](#プリセットについて)
+- [導入・安全再ビルド](#導入安全再ビルド)
+- [インストーラーパッケージの生成](#インストーラーパッケージの生成)
+- [公開前の注意](#公開前の注意)
+- [開発](#開発)
+- [設定](#設定)
+- [アンインストール](#アンインストール)
+- [既知の制限](#既知の制限)
+- [セキュリティ](#セキュリティ)
+- [サポート](#サポート)
+- [ライセンス](#ライセンス)
 
 ## 主な機能
 
 - 音声ファイルを直接入力できます。
-  - 入力: AAC / AIFF / ALAC / FLAC / M4A / MP3 / OGG / Opus / WAV / WMA
-  - 動画からの音声出力: MP4 / MOV / MKV / AVI
+  - 音声入力: AAC / AIFF（`.aif` / `.aiff`）/ ALAC / FLAC / M4A / MP3 / OGG / Opus / WAV / WMA
+  - 音声抽出の入力: MP4 / MOV / MKV / AVI
+  - 動画正規化の入力: MP4 / MOV / MKV（AVIは動画正規化には対応せず、音声抽出のみ）
   - 音声出力: MP3 / M4A / AAC / FLAC / WAV / Opus / OGG
 - 「解析のみ」で、各音声トラックのIntegrated Loudness、True Peak、
   Loudness Rangeを測定し、JSONレポートを作成できます。
-- 既に目標値の±0.5 LU以内でTrue Peak上限も満たす同一形式ファイルは、
-  再圧縮せずバイト列をコピーします。
+- 既に目標値の±0.5 LU以内でTrue Peak上限も満たし、同一形式・再生速度100%の
+  ファイルは、再圧縮せずバイト列をコピーします。
 - ファイル/フォルダのドラッグ＆ドロップ、複数ファイル選択、
   サブフォルダ再帰検索、出力階層の維持に対応します。
 - 動画正規化では全音声トラックを処理し、映像、字幕、チャプター、
@@ -38,7 +64,23 @@ FFmpeg、ffprobe、Python、ffmpeg-normalizeが含まれています。利用者
 - 各プリセットには用途、規格または運用根拠、注意点を表示します。
   実行前に選択プリセットと現在値の一致を確認できます。
 
-## 起動方法
+## 動作要件
+
+配布版のGUI/CLIはWindows 10/11と、Windows PowerShell 5.1またはPowerShell 7が
+必要です。`media-normalizer.ps1`と診断スクリプトはPowerShell 5.1以上で動作する
+よう宣言されています。インストーラーの導入・更新処理もWindows PowerShell 5.1に
+対応しています。
+
+Windows PowerShell 5.1ではGUIの非同期プローブにThreadJobモジュールが必要です。
+未導入の場合は警告を表示して同期モードへフォールバックします。PowerShell 7.4以降は
+ThreadJobが本体に同梱されています。5.1で非同期処理を使用する場合は、必要に応じて
+`Install-Module ThreadJob -Scope CurrentUser`で導入してください。
+
+sourceからの再ビルドと依存物の取得にはPowerShell 7（`pwsh`）と.NET 10 SDKが
+必要です。対応architectureのFFmpeg・ffprobeはportable packageへ同梱されるため、
+配布版の利用者による個別インストールは不要です。
+
+## インストール
 
 1. 使用するWindowsに合うZIPを展開します。
    - 一般的なIntel/AMD搭載PC: `media-normalizer-win-x64.zip`
@@ -54,7 +96,7 @@ FFmpeg、ffprobe、Python、ffmpeg-normalizeが含まれています。利用者
 > `media-normalizer.bat` だけを別の場所へ移動しないでください。
 > `runtime`、`lib`、`assets`を含む展開済みフォルダ全体が必要です。
 
-## GUIの使い方
+## 使用方法
 
 1. ファイル/フォルダを画面へドロップするか、フォルダ/ファイル選択ボタンで
    入力を指定します。
@@ -109,7 +151,10 @@ pwsh -File .\media-normalizer.ps1 -Cli `
 主なオプション:
 
 - `-Mode audio|video|both`
+- `-InputDir <フォルダ>`（フォルダ入力。`-InputPath`でも指定できます）
+- `-InputPath <ファイルまたはフォルダ>`（複数指定可。`-InputFile`は別名です）
 - `-AudioOutputFormat mp3|m4a|aac|flac|wav|opus|ogg`
+- `-SpeedPercent 50..200`（整数、既定は`100`。100%が等速です）
 - `-AnalyzeOnly`
 - `-SkipIfNormalized:$false`（既定は有効）
 - `-NormalizationTolerance 0.5`
@@ -117,6 +162,10 @@ pwsh -File .\media-normalizer.ps1 -Cli `
 - `-PreserveHierarchy:$false`（既定は有効）
 - `-CollisionPolicy rename|skip|overwrite`
 - `-ReportPath <JSONパス>`
+
+速度変更は50〜200%の整数で指定します。字幕またはチャプター付き動画、HDR・
+BT.2020・10bit以上の動画は、100%以外を安全のため拒否します。動画の速度変更では、
+音声に可逆中間コーデックを使用します。
 
 存在しないプリセット名は既定値へ黙って置換せず、利用可能な名前を表示して
 エラー終了します。
@@ -162,6 +211,8 @@ x64またはARM64の適切な配布物を生成します。
 既存の同一バージョン・同一アーキテクチャ配布物がある場合は、manifest、
 SHA-256、PEアーキテクチャを再検証して同梱ランタイムを再利用します。利用可能な
 配布物もキャッシュもない初回ビルドだけ、固定バージョンの依存物を取得します。
+FFmpegはBtbNの保持方針で2年間保存される月末buildへ固定します。直近14件だけが
+保存される日次buildや内容が変動する`latest` URLは、再現可能な取得元として使用しません。
 
 一般公開前など、既存ランタイムや共有キャッシュを一切使わずに取得経路から
 検証する場合は、同じ入口へ`--clean`を指定します。
@@ -216,8 +267,9 @@ powershell.exe -STA -NoProfile -ExecutionPolicy Bypass `
 payloadが未生成のまま実行した場合は、manifest欠落として
 `MEDIA_NORMALIZER_INSTALLER:MANIFEST_INVALID`を表示して停止します。manifestに記載された
 対応ZIPだけが欠ける場合は`MEDIA_NORMALIZER_INSTALLER:PAYLOAD_ARCHIVE_MISSING`で停止します。
-配布パッケージに同梱される利用者向けの入口BATは配布側のレイアウトに属し、
-このリポジトリには含まれません。インストーラーの信頼境界と更新順序は
+配布パッケージに同梱される利用者向けの入口BATは、リポジトリ内の
+`scripts/package-templates/media-normalizer.bat`を元にビルド時に配布物ルートへ生成します。
+テンプレート自体はこのリポジトリに含まれます。インストーラーの信頼境界と更新順序は
 `installer/README.md` と `docs/installer-architecture.md` を参照してください。
 
 ## 公開前の注意
@@ -226,73 +278,45 @@ payloadが未生成のまま実行した場合は、manifest欠落として
 コード署名、公開チェックサム、FFmpeg等のライセンス表示と対応ソース提供方法を
 公開工程として整備してください。
 
-## Overview
-
-Media Normalizerは、Windows上で音声・動画のラウドネス、音声形式、再生速度を
-一括調整するPowerShell製ツールです。GUIとCLIを備え、portable packageでは固定済みの
-FFmpegとPython runtimeを使用します。
-
-## Requirements
-
-sourceからの実行・再ビルドにはWindows 10/11、PowerShell 7、対応architectureの
-FFmpeg・ffprobeが必要です。portable packageは必要なruntimeを同梱し、起動時に
-version、SHA-256、必要機能を検証します。
-
-## Installation
-
-利用者向けの導入手順は[起動方法](#起動方法)を参照してください。配布ZIPは
-Windows x64用とWindows ARM64用を分けて提供し、展開後はフォルダー全体を保持して
-`media-normalizer.bat`を実行します。
-
-配布ZIPとinstaller payloadはいずれも生成物のため、このリポジトリには含まれません。
-sourceから導入する場合は[導入・安全再ビルド](#導入安全再ビルド)または
-[インストーラーパッケージの生成](#インストーラーパッケージの生成)を実行してください。
-
-## Usage
-
-GUI操作は[GUIの使い方](#guiの使い方)、自動処理や検証用途は[CLI](#cli)を参照して
-ください。正規化前に、選択したプリセットと納品先・配信先の要件が一致することを
-確認してください。
-
-## Development
+## 開発
 
 再現可能なportable buildは[導入・安全再ビルド](#導入安全再ビルド)に従います。ビルド
 入口とビルド補助scriptはすべて`scripts/`配下にあり、リポジトリルートに実行用BATは
 置きません。依存versionとSHA-256は`portable-dependencies.json`で固定されています。
 公開候補の生成物、テスト結果、ローカル設定、ログはsource repositoryへ含めません。
 
-## Configuration
+## 設定
 
 GUI設定は利用者のローカル`settings.json`に保存されます。このファイルは端末固有情報を
 含み得るためsource repositoryには含めません。CLIの入力・出力・preset指定は[CLI](#cli)を
 参照してください。
 
-## Uninstall
+## アンインストール
 
 portable版はMedia Normalizerの展開folderを削除します。installer版はWindowsの
 「インストールされているアプリ」からアンインストールしてください。入力メディアと、
 利用者が指定した出力folderは自動削除されません。
 
-## Known limitations
+## 既知の制限
 
 GUI、installer、同梱runtimeはWindows専用です。配布ZIPはx64版とARM64版が別です。
 生成物は現時点ではコード署名されていないため、公開時はチェックサムと署名状態を明示します。
 DRM保護された入力や、同梱FFmpegが対応しないcodecは処理できません。
 
-## Security
+## セキュリティ
 
 脆弱性の可能性がある情報、認証情報、個人情報を含むメディアは公開Issueへ投稿しないで
 ください。GitHub repository公開後はGitHub Security Advisoriesの非公開報告機能を
 使用してください。同梱実行ファイルと依存packageは、配布manifestおよび起動時診断で
 versionとSHA-256を検証します。
 
-## Support
+## サポート
 
 一般的な不具合報告と機能要望は、再現手順、Windows architecture、入力形式、表示された
 エラーを添えてGitHub Issuesへ提出してください。著作権で保護された入力メディア、認証情報、
 個人情報、設定ファイル全体は添付しないでください。
 
-## License
+## ライセンス
 
 Media Normalizerの独自source codeは[MIT License](LICENSE)で提供します。portable ZIPに
 含まれるFFmpeg、Python、Python packagesには個別のライセンスが適用されます。

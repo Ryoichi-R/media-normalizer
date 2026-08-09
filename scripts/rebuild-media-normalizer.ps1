@@ -258,6 +258,69 @@ function Get-PeMachine {
     }
 }
 
+function Publish-Launcher {
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [Parameter(Mandatory)][string]$PackageRoot,
+        [Parameter(Mandatory)][string]$StagingRoot,
+        [Parameter(Mandatory)][ValidateSet('win-x64', 'win-arm64')][string]$Runtime
+    )
+
+    $dotnet = Get-Command dotnet -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($null -eq $dotnet) {
+        throw 'MediaNormalizer.exe の生成には .NET 10 SDK (dotnet) が必要です。'
+    }
+
+    $launcherProject = Assert-PathWithinRoot `
+        -Path (Join-Path $ProjectRoot 'src\MediaNormalizer.Launcher\MediaNormalizer.Launcher.csproj') `
+        -Root $ProjectRoot
+    if (-not (Test-Path -LiteralPath $launcherProject -PathType Leaf)) {
+        throw "Launcher project was not found: $launcherProject"
+    }
+
+    $publishRoot = Assert-ManagedDirectory `
+        -Path (Join-Path $PackageRoot '.launcher-publish') `
+        -Root $StagingRoot `
+        -ExpectedLeaf '.launcher-publish'
+    New-Item -ItemType Directory -Path $publishRoot -Force | Out-Null
+
+    Write-Host "Publishing self-contained launcher: $Runtime" -ForegroundColor Cyan
+    & $dotnet.Source publish $launcherProject `
+        --configuration Release `
+        --runtime $Runtime `
+        --self-contained true `
+        --output $publishRoot `
+        -p:PublishSingleFile=true `
+        -p:IncludeNativeLibrariesForSelfExtract=true `
+        -p:EnableCompressionInSingleFile=true `
+        -p:DebugSymbols=false `
+        -p:DebugType=None
+    if ($LASTEXITCODE -ne 0) {
+        throw "Launcher publish failed for $Runtime with exit code $LASTEXITCODE."
+    }
+
+    $publishedFiles = @(Get-ChildItem -LiteralPath $publishRoot -File -Recurse)
+    $publishedLauncher = Join-Path $publishRoot 'MediaNormalizer.exe'
+    if ($publishedFiles.Count -ne 1 -or
+        -not (Test-Path -LiteralPath $publishedLauncher -PathType Leaf)) {
+        throw "Launcher publish must produce exactly one MediaNormalizer.exe: $publishRoot"
+    }
+
+    $expectedMachine = if ($Runtime -eq 'win-arm64') { 0xAA64 } else { 0x8664 }
+    $actualMachine = Get-PeMachine -Path $publishedLauncher
+    if ($actualMachine -ne $expectedMachine) {
+        throw ('Launcher architecture mismatch. Expected 0x{0:X4}, actual 0x{1:X4}: {2}' -f
+            $expectedMachine, $actualMachine, $publishedLauncher)
+    }
+
+    $launcherDestination = Assert-PathWithinRoot `
+        -Path (Join-Path $PackageRoot 'MediaNormalizer.exe') `
+        -Root $StagingRoot
+    Copy-Item -LiteralPath $publishedLauncher -Destination $launcherDestination
+    Remove-Item -LiteralPath $publishRoot -Recurse -Force
+}
+
 function Select-OutputRootFolder {
     param([Parameter(Mandatory)][string]$InitialDirectory)
 
@@ -612,6 +675,12 @@ try {
         -ProjectRoot $projectRoot `
         -StagingDirectory $stagingDirectory `
         -StagingRoot $stagingManagedRoot
+
+    Publish-Launcher `
+        -ProjectRoot $projectRoot `
+        -PackageRoot $stagingDirectory `
+        -StagingRoot $stagingManagedRoot `
+        -Runtime $Runtime
 
     $runtimePrepared = $false
     if (-not $CleanBuild -and

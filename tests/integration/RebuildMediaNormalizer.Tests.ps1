@@ -139,6 +139,7 @@ Describe 'Media Normalizer rebuild integration' -Tag 'Integration' {
                 Should -Be (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
         }
         foreach ($runtimeFile in @(
+                'MediaNormalizer.exe',
                 'portable-package.marker',
                 'runtime\dependency-manifest.json',
                 'runtime\ffmpeg\bin\ffmpeg.exe',

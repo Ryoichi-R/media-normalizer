@@ -1,21 +1,22 @@
 {
     "schemaVersion": 1,
     "ffmpeg": {
-        "version": "8.1.2-31-g8c9502e9b0",
+        "version": "8.1.2-34-g9b6c8969e0",
         "license": "GPL-3.0-or-later",
-        "release": "autobuild-2026-07-24-13-32",
-        "sourceUrl": "https://github.com/FFmpeg/FFmpeg/tree/8c9502e9b0",
-        "buildSourceUrl": "https://github.com/BtbN/FFmpeg-Builds/tree/8c736b2",
+        "release": "autobuild-2026-07-31-14-10",
+        "releaseRetention": "monthly-last-build-two-years",
+        "sourceUrl": "https://github.com/FFmpeg/FFmpeg/tree/9b6c8969e0",
+        "buildSourceUrl": "https://github.com/BtbN/FFmpeg-Builds/tree/a99e8230eae00d1cee38f23076a7a1f55cd984e2",
         "runtimes": {
             "win-x64": {
-                "archiveName": "ffmpeg-n8.1.2-31-g8c9502e9b0-win64-gpl-8.1.zip",
-                "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-24-13-32/ffmpeg-n8.1.2-31-g8c9502e9b0-win64-gpl-8.1.zip",
-                "sha256": "ef4f875f374414a6c49bdc91f1acc227e65d0a82af6e6888874a7b812a18de97"
+                "archiveName": "ffmpeg-n8.1.2-34-g9b6c8969e0-win64-gpl-8.1.zip",
+                "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-31-14-10/ffmpeg-n8.1.2-34-g9b6c8969e0-win64-gpl-8.1.zip",
+                "sha256": "cc4156d51387566ea8ba653fc3a04897bdf812fddf652428d9030bbf7ae24835"
             },
             "win-arm64": {
-                "archiveName": "ffmpeg-n8.1.2-31-g8c9502e9b0-winarm64-gpl-8.1.zip",
-                "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-24-13-32/ffmpeg-n8.1.2-31-g8c9502e9b0-winarm64-gpl-8.1.zip",
-                "sha256": "f84f065fddec914d8af6089a41ab9d0aceebcf3e617fd278e1f02350998a245b"
+                "archiveName": "ffmpeg-n8.1.2-34-g9b6c8969e0-winarm64-gpl-8.1.zip",
+                "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-31-14-10/ffmpeg-n8.1.2-34-g9b6c8969e0-winarm64-gpl-8.1.zip",
+                "sha256": "abf3b41c200ce5346b9bb5be6fe634c4720d891778d8921f7b36b76d002b3c96"
             }
         }
     },

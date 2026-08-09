@@ -4,6 +4,7 @@
     # rebuild-media-normalizer.ps1 のステージング検証と、配布物整合性ゲートの双方から
     # このファイルを単一の定義として読む(行番号にも複製にも依存させない)。
     RequiredRelativePaths = @(
+        'MediaNormalizer.exe',
         'media-normalizer.bat',
         'media-normalizer.ps1',
         'diagnose.bat',
