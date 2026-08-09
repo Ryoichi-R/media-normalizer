@@ -138,6 +138,11 @@ try {
     $readme = Get-Content -LiteralPath (Join-Path $projectRoot 'README.md') -Raw
     $uiModule = Get-Content -LiteralPath (
         Join-Path $projectRoot 'lib\MediaNormalizer.Ui.psm1') -Raw
+    $launcherSources = @(Get-ChildItem -LiteralPath (
+            Join-Path $projectRoot 'src\MediaNormalizer.Launcher') -Filter '*.cs' -File)
+    $launcherSource = ($launcherSources | ForEach-Object {
+            Get-Content -LiteralPath $_.FullName -Raw
+        }) -join "`n"
     Assert-Contract (
         -not (Test-Path -LiteralPath (Join-Path $projectRoot 'media-normalizer.bat'))
     ) 'The source root must not expose a direct application launcher.'
@@ -208,6 +213,12 @@ try {
             [StringComparison]::Ordinal) -and
         -not $uiModule.Contains('Export-ModuleMember -Function *', [StringComparison]::Ordinal)
     ) 'UI module must export only the four supported GUI entrypoints.'
+    Assert-Contract (
+        $launcherSources.Count -ge 4 -and
+        $launcherSource.Contains('PipeOptions.CurrentUserOnly', [StringComparison]::Ordinal) -and
+        $launcherSource.Contains('AllowSetForegroundWindow(guiProcess.Id)', [StringComparison]::Ordinal) -and
+        $launcherSource.Contains('Process.Start(CreatePowerShellStartInfo', [StringComparison]::Ordinal)
+    ) 'Launcher build inputs must include the activation channel and foreground delegation.'
 
     $runtimeCheck = Get-Content `
         -LiteralPath (Join-Path $projectRoot 'diagnostics\runtime-check.ps1') `
@@ -345,6 +356,11 @@ try {
         $rebuild.Contains('Compress-Archive', [StringComparison]::Ordinal)
     ) 'Rebuild must emit a portable ZIP.'
     Assert-Contract (
+        $rebuild.Contains('Remove-PortablePythonBytecode', [StringComparison]::Ordinal) -and
+        $rebuild.Contains("'__pycache__'", [StringComparison]::Ordinal) -and
+        $rebuild.Contains("'.pyc'", [StringComparison]::Ordinal)
+    ) 'Rebuild must remove Python bytecode before creating the portable ZIP.'
+    Assert-Contract (
         $rebuild.Contains('.zip.sha256', [StringComparison]::Ordinal)
     ) 'Rebuild must emit a ZIP checksum.'
     Assert-Contract (
@@ -352,6 +368,16 @@ try {
         (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'test-artifact-integrity.ps1') -Raw).
             Contains('throw "成果物整合性検証に失敗しました', [StringComparison]::Ordinal)
     ) 'Rebuild must fail closed when the artifact integrity post-condition fails.'
+    $zipPrivacy = Get-Content `
+        -LiteralPath (Join-Path $PSScriptRoot 'test-zip-privacy.ps1') `
+        -Raw
+    Assert-Contract (
+        $zipPrivacy.Contains('MediaNormalizerZipPrivacyScanner', [StringComparison]::Ordinal) -and
+        $zipPrivacy.Contains('LocalWindowsUserPathCandidates', [StringComparison]::Ordinal) -and
+        $zipPrivacy.Contains("'C:\Users\'", [StringComparison]::Ordinal) -and
+        (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'test-artifact-integrity.ps1') -Raw).
+            Contains('test-zip-privacy.ps1', [StringComparison]::Ordinal)
+    ) 'Artifact verification must scan ZIP entry bytes and reject local Windows user paths.'
 
     $installerBuilder = Get-Content `
         -LiteralPath (Join-Path $PSScriptRoot 'build-media-normalizer-installer-package.ps1') `
@@ -377,6 +403,11 @@ try {
             'artifacts\launcher\$rid\MediaNormalizer.exe',
             [StringComparison]::OrdinalIgnoreCase)
     ) 'Installer package rebuild must consume the launcher from the canonical portable package.'
+    Assert-Contract (
+        $installerBuilder.Contains('test-zip-privacy.ps1', [StringComparison]::Ordinal) -and
+        $installerBuilder.Contains('[IO.File]::Replace', [StringComparison]::Ordinal) -and
+        $installerBuilder.Contains('.staging-', [StringComparison]::Ordinal)
+    ) 'Installer payload must pass binary privacy inspection before verified replacement.'
 
     $prepareRuntime = Get-Content `
         -LiteralPath (Join-Path $PSScriptRoot 'prepare-portable-runtime.ps1') `
@@ -409,6 +440,14 @@ try {
             'Dependency download failed after $totalAttempts attempts:',
             [StringComparison]::Ordinal)
     ) 'Dependency downloads must retry a bounded number of times and fail clearly.'
+    Assert-Contract (
+        $prepareRuntime.Contains(
+            '$env:PYTHONDONTWRITEBYTECODE = ''1''',
+            [StringComparison]::Ordinal) -and
+        $prepareRuntime.Contains(
+            '$env:PYTHONDONTWRITEBYTECODE = $oldPythonDontWriteBytecode',
+            [StringComparison]::Ordinal)
+    ) 'Runtime validation must not create path-bearing Python bytecode and must restore the host environment.'
 
     $dependencies = Get-Content `
         -LiteralPath (Join-Path $projectRoot 'portable-dependencies.json') `
@@ -419,6 +458,20 @@ try {
     Assert-Contract (
         [string]$dependencies.ffmpeg.version -eq '8.1.2-34-g9b6c8969e0'
     ) 'FFmpeg must remain pinned to the reviewed build.'
+    $thirdPartyNotices = Get-Content `
+        -LiteralPath (Join-Path $projectRoot 'THIRD-PARTY-NOTICES.md') `
+        -Raw
+    Assert-Contract (
+        $thirdPartyNotices.Contains(
+            [string]$dependencies.ffmpeg.version,
+            [StringComparison]::Ordinal) -and
+        $thirdPartyNotices.Contains(
+            [string]$dependencies.ffmpeg.sourceUrl,
+            [StringComparison]::Ordinal) -and
+        $thirdPartyNotices.Contains(
+            [string]$dependencies.ffmpeg.buildSourceUrl,
+            [StringComparison]::Ordinal)
+    ) 'Third-party notices must match the locked FFmpeg binary and corresponding sources.'
     Assert-Contract (
         [string]$dependencies.ffmpeg.releaseRetention -eq
             'monthly-last-build-two-years' -and

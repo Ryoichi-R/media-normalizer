@@ -11,6 +11,7 @@ $ErrorActionPreference = 'Stop'
 $project = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $payloadRoot = Join-Path $project 'installer\payload'
 $manifestPath = Join-Path $payloadRoot 'payload-manifest.json'
+$privacyScript = Join-Path $PSScriptRoot 'test-zip-privacy.ps1'
 foreach ($path in @($project, $payloadRoot, $manifestPath)) {
     if (Test-SecretFilePath -FilePath $path) {
         throw "MEDIA_NORMALIZER_SECRET_PATH_REJECTED: $path"
@@ -45,8 +46,55 @@ foreach ($rid in $Runtime) {
 
     $archiveName = "MediaNormalizer-$rid.zip"
     $archive = Join-Path $payloadRoot $archiveName
-    if (Test-Path -LiteralPath $archive) { Remove-Item -LiteralPath $archive -Force }
-    Compress-Archive -Path (Join-Path $package '*') -DestinationPath $archive -CompressionLevel Optimal
+    $replacementId = [Guid]::NewGuid().ToString('N')
+    $stagingArchive = Join-Path $payloadRoot ".staging-$replacementId-$archiveName"
+    $replacementBackup = Join-Path $payloadRoot ".rollback-$replacementId-$archiveName"
+    $archiveExisted = Test-Path -LiteralPath $archive -PathType Leaf
+    $replacementSucceeded = $false
+    try {
+        Compress-Archive `
+            -Path (Join-Path $package '*') `
+            -DestinationPath $stagingArchive `
+            -CompressionLevel Optimal
+        & $privacyScript -ZipPath $stagingArchive | Out-Null
+        $stagingHash = (Get-FileHash -LiteralPath $stagingArchive -Algorithm SHA256).Hash
+
+        if ($archiveExisted) {
+            [IO.File]::Replace($stagingArchive, $archive, $replacementBackup, $true)
+        }
+        else {
+            Move-Item -LiteralPath $stagingArchive -Destination $archive
+        }
+        if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $stagingHash) {
+            throw "Installer payload ZIP replacement verification failed: $archiveName"
+        }
+        & $privacyScript -ZipPath $archive | Out-Null
+        $replacementSucceeded = $true
+    }
+    catch {
+        $replacementError = $_
+        if (Test-Path -LiteralPath $replacementBackup -PathType Leaf) {
+            Copy-Item -LiteralPath $replacementBackup -Destination $archive -Force
+            if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne
+                (Get-FileHash -LiteralPath $replacementBackup -Algorithm SHA256).Hash) {
+                throw "Installer payload rollback verification failed: $archiveName"
+            }
+        }
+        elseif (-not $archiveExisted -and
+            (Test-Path -LiteralPath $archive -PathType Leaf)) {
+            Remove-Item -LiteralPath $archive -Force
+        }
+        throw $replacementError
+    }
+    finally {
+        if (Test-Path -LiteralPath $stagingArchive -PathType Leaf) {
+            Remove-Item -LiteralPath $stagingArchive -Force
+        }
+        if ($replacementSucceeded -and
+            (Test-Path -LiteralPath $replacementBackup -PathType Leaf)) {
+            Remove-Item -LiteralPath $replacementBackup -Force
+        }
+    }
 
     $managed = @(Get-ChildItem -LiteralPath $package -File -Recurse | Sort-Object FullName | ForEach-Object {
         [ordered]@{

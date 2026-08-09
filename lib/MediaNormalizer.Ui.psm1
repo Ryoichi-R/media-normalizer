@@ -2138,6 +2138,7 @@ function Show-MainForm {
     $stateRef = $State
     $State.Form.Add_Shown({
         [void][Native.Win32]::ShowWindow($stateRef.Form.Handle, 5)  # SW_SHOW
+        $stateRef.Form.Activate()
     }.GetNewClosure())
     [void]$State.Form.ShowDialog()
 }

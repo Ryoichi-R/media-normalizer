@@ -446,11 +446,13 @@ try {
         $oldPythonHome = $env:PYTHONHOME
         $oldPythonPath = $env:PYTHONPATH
         $oldFfmpegPath = $env:FFMPEG_PATH
+        $oldPythonDontWriteBytecode = $env:PYTHONDONTWRITEBYTECODE
         try {
             $env:PATH = "$ffmpegOutputBin;$pythonRoot;$oldPath"
             $env:PYTHONHOME = $pythonRoot
             $env:PYTHONPATH = $sitePackages
             $env:FFMPEG_PATH = $criticalPaths.FFmpeg
+            $env:PYTHONDONTWRITEBYTECODE = '1'
 
             $ffmpegVersion = & $criticalPaths.FFmpeg -version 2>&1
             if ($LASTEXITCODE -ne 0 -or
@@ -471,6 +473,7 @@ try {
             $env:PYTHONHOME = $oldPythonHome
             $env:PYTHONPATH = $oldPythonPath
             $env:FFMPEG_PATH = $oldFfmpegPath
+            $env:PYTHONDONTWRITEBYTECODE = $oldPythonDontWriteBytecode
         }
     }
 

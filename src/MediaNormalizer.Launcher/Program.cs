@@ -1,17 +1,20 @@
 using System.ComponentModel;
 using System.Diagnostics;
-using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 
 namespace MediaNormalizer.Launcher;
 
-internal static partial class Program
+internal static class Program
 {
     private const string Product = "Media Normalizer";
-
-    [LibraryImport("user32.dll", EntryPoint = "MessageBoxW", StringMarshalling = StringMarshalling.Utf16)]
-    private static partial int MessageBox(nint owner, string text, string caption, uint type);
+    private const int RuntimeCheckFailed = 20;
+    private const int GuiChildFailed = 21;
+    private const int ActivationUnavailable = 22;
+    private const int ActivationInvalid = 23;
+    private const int WindowReadyTimeout = 24;
+    private const int RunningLockHeld = 25;
 
     [STAThread]
     private static int Main(string[] args)
@@ -27,9 +30,12 @@ internal static partial class Program
             var ffprobe = RequireFile(root, @"runtime\ffmpeg\bin\ffprobe.exe");
             var python = RequireFile(root, @"runtime\python\python.exe");
             var shell = FindShell();
-            var mutexName = $"Local\\MediaNormalizer-App-{StablePathHash(root)}";
+            var pathHash = StableHash(root);
+            var mutexName = $"Local\\MediaNormalizer-App-{pathHash}";
+            var pipeName = BuildPipeName(pathHash);
 
             mutex = new Mutex(false, mutexName);
+            var recoveredAbandonedMutex = false;
             try
             {
                 mutexTaken = mutex.WaitOne(0);
@@ -37,11 +43,17 @@ internal static partial class Program
             catch (AbandonedMutexException)
             {
                 mutexTaken = true;
+                recoveredAbandonedMutex = true;
             }
+
             if (!mutexTaken)
             {
-                Show("Media Normalizer は既に起動しています。");
-                return 2;
+                if (args.Length > 0)
+                {
+                    return 2;
+                }
+
+                return ActivateExisting(pipeName);
             }
 
             var environment = new Dictionary<string, string>
@@ -52,17 +64,80 @@ internal static partial class Program
                 ["MEDIA_NORMALIZER_PYTHON"] = python
             };
 
-            var checkExit = RunPowerShell(shell, runtimeCheck, [], root, environment);
-            if (checkExit != 0)
+            if (args.Length > 0)
             {
-                Show($"同梱ランタイムの確認に失敗しました。終了コード: {checkExit}");
-                return checkExit;
+                var checkExit = RunPowerShellAndWait(shell, runtimeCheck, [], root, environment);
+                if (checkExit != 0) return checkExit;
+                return RunPowerShellAndWait(shell, script, args, root, environment);
             }
-            return RunPowerShell(shell, script, args, root, environment);
+
+            ActivationServer? activationServer = null;
+            try
+            {
+                activationServer = ActivationServer.TryStart(pipeName);
+
+                var checkExit = RunPowerShellAndWait(shell, runtimeCheck, [], root, environment);
+                if (checkExit != 0)
+                {
+                    activationServer?.SetTerminalFailure();
+                    ShowError($"同梱ランタイムの確認に失敗しました。終了コード: {checkExit}\n" +
+                              "diagnose.bat を実行して結果を確認してください。");
+                    return RuntimeCheckFailed;
+                }
+
+                if (!CanAcquireRunningLock(root))
+                {
+                    activationServer?.SetTerminalFailure();
+                    var reason = recoveredAbandonedMutex
+                        ? "ランチャーの異常終了後も既存の画面が動作している可能性があります。"
+                        : "既存の画面が動作している可能性があります。";
+                    ShowError(reason + "\n二重起動を防止しました。既存画面を確認してください。");
+                    return RunningLockHeld;
+                }
+
+                using var guiProcess = StartGuiPowerShell(shell, script, root, environment);
+                NativeMethods.AllowSetForegroundWindow(guiProcess.Id);
+                activationServer?.SetGuiProcess(guiProcess);
+
+                var window = WindowActivator.WaitForMainWindow(guiProcess, TimeSpan.FromSeconds(30));
+                if (window == 0)
+                {
+                    if (!guiProcess.HasExited)
+                    {
+                        activationServer?.SetTerminalFailure();
+                        ShowError("Media Normalizer の画面を30秒以内に確認できませんでした。\n" +
+                                  "処理は停止していません。diagnose.bat を実行して結果を確認してください。");
+                        return WindowReadyTimeout;
+                    }
+                }
+                else
+                {
+                    activationServer?.SetWindowReady(window);
+                }
+
+                guiProcess.WaitForExit();
+                var guiExit = guiProcess.ExitCode;
+                activationServer?.SetTerminalFailure();
+                if (guiExit != 0)
+                {
+                    ShowError("Media Normalizer の起動に失敗しました。\n" +
+                              $"終了コード: {guiExit}\n" +
+                              "diagnose.bat を実行して結果を確認してください。");
+                    return GuiChildFailed;
+                }
+
+                return 0;
+            }
+            finally
+            {
+                activationServer?.Dispose();
+            }
         }
         catch (Exception ex)
         {
-            Show(ex.Message);
+            Debug.WriteLine(ex);
+            ShowError("Media Normalizer を起動できませんでした。\n" +
+                      "diagnose.bat を実行して結果を確認してください。");
             return 1;
         }
         finally
@@ -79,6 +154,24 @@ internal static partial class Program
             }
             mutex?.Dispose();
         }
+    }
+
+    private static int ActivateExisting(string pipeName)
+    {
+        var result = ActivationClient.RequestActivation(pipeName);
+        if (result.Status is ActivationStatus.Activated or ActivationStatus.Flashed or ActivationStatus.Pending)
+            return 0;
+
+        if (result.Status == ActivationStatus.Unavailable)
+        {
+            ShowError("既存の Media Normalizer へ接続できませんでした。\n" +
+                      "タスクバーの既存画面を確認してください。");
+            return ActivationUnavailable;
+        }
+
+        ShowError("既存の Media Normalizer の画面を確認できませんでした。\n" +
+                  "タスクバーの既存画面を確認してください。");
+        return ActivationInvalid;
     }
 
     private static string RequireFile(string root, string relative)
@@ -111,8 +204,8 @@ internal static partial class Program
         throw new FileNotFoundException("PowerShell 7 または Windows PowerShell 5.1 が必要です。");
     }
 
-    private static int RunPowerShell(string shell, string script, IEnumerable<string> args,
-        string root, IReadOnlyDictionary<string, string> environment)
+    private static ProcessStartInfo CreatePowerShellStartInfo(string shell, string script,
+        IEnumerable<string> args, string root, IReadOnlyDictionary<string, string> environment)
     {
         var start = new ProcessStartInfo(shell)
         {
@@ -133,16 +226,62 @@ internal static partial class Program
             Path.Combine(root, @"runtime\ffmpeg\bin"),
             Path.Combine(root, @"runtime\python"),
             start.Environment["PATH"]);
-        using var process = Process.Start(start) ?? throw new Win32Exception("PowerShellを起動できませんでした。");
+        return start;
+    }
+
+    private static int RunPowerShellAndWait(string shell, string script, IEnumerable<string> args,
+        string root, IReadOnlyDictionary<string, string> environment)
+    {
+        using var process = Process.Start(CreatePowerShellStartInfo(shell, script, args, root, environment))
+            ?? throw new Win32Exception("PowerShellを起動できませんでした。");
         process.WaitForExit();
         return process.ExitCode;
     }
 
-    private static string StablePathHash(string path)
+    private static Process StartGuiPowerShell(string shell, string script, string root,
+        IReadOnlyDictionary<string, string> environment) =>
+        Process.Start(CreatePowerShellStartInfo(shell, script, [], root, environment))
+        ?? throw new Win32Exception("PowerShellを起動できませんでした。");
+
+    private static bool CanAcquireRunningLock(string root)
     {
-        var canonical = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)).ToUpperInvariant();
+        try
+        {
+            using var stream = new FileStream(
+                Path.Combine(root, ".media-normalizer-running.lock"),
+                FileMode.OpenOrCreate,
+                FileAccess.ReadWrite,
+                FileShare.None);
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static string BuildPipeName(string pathHash)
+    {
+        var sid = WindowsIdentity.GetCurrent().User?.Value ?? "unknown-user";
+        var userHash = StableHash(sid);
+        var sessionId = Process.GetCurrentProcess().SessionId;
+        return $"MediaNormalizer-Activation-{pathHash}-{userHash}-{sessionId}";
+    }
+
+    private static string StableHash(string value)
+    {
+        var canonical = Path.IsPathFullyQualified(value)
+            ? Path.TrimEndingDirectorySeparator(Path.GetFullPath(value)).ToUpperInvariant()
+            : value;
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)))[..16];
     }
 
-    private static void Show(string message) => MessageBox(0, message, Product, 0x10);
+    private static void ShowError(string message)
+    {
+        _ = NativeMethods.MessageBox(0, message, Product, 0x10);
+    }
 }

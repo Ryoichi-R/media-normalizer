@@ -70,6 +70,9 @@ foreach ($rid in $Runtime) {
             throw "ZIPチェックサムが一致しません: $zipPath"
         }
 
+        $privacyReceipt = & (Join-Path $PSScriptRoot 'test-zip-privacy.ps1') `
+            -ZipPath $zipPath
+
         $archive = [IO.Compression.ZipFile]::OpenRead($zipPath)
         try {
             $entryMap = @{}
@@ -133,6 +136,9 @@ foreach ($rid in $Runtime) {
             RequiredFiles = @($required).Count
             ZipEntries = $entryMap.Count
             UncompressedBytes = $readBytes
+            BytecodeEntries = [int]$privacyReceipt.BytecodeEntries
+            LocalWindowsUserPathCandidates =
+                [int]$privacyReceipt.LocalWindowsUserPathCandidates
             Status = 'OK'
         })
     } catch {

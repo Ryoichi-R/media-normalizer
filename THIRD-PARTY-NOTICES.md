@@ -6,11 +6,11 @@ in `runtime/dependency-manifest.json`.
 
 ## FFmpeg
 
-- Version: 8.1.2-31-g8c9502e9b0
+- Version: 8.1.2-34-g9b6c8969e0
 - Binary provider: BtbN/FFmpeg-Builds
 - License of the bundled build: GPL-3.0-or-later
-- FFmpeg source: <https://github.com/FFmpeg/FFmpeg/tree/8c9502e9b0>
-- Build recipe source: <https://github.com/BtbN/FFmpeg-Builds/tree/8c736b2>
+- FFmpeg source: <https://github.com/FFmpeg/FFmpeg/tree/9b6c8969e0>
+- Build recipe source: <https://github.com/BtbN/FFmpeg-Builds/tree/a99e8230eae00d1cee38f23076a7a1f55cd984e2>
 
 The selected build enables GPL components including libx264. Anyone
 redistributing the portable ZIP must also satisfy the applicable GPL source

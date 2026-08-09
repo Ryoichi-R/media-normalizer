@@ -120,6 +120,64 @@ function Clear-DirectoryContents {
     }
 }
 
+function Remove-PortablePythonBytecode {
+    param(
+        [Parameter(Mandatory)][string]$PackageRoot,
+        [Parameter(Mandatory)][string]$StagingRoot
+    )
+
+    $packageFull = Assert-PathWithinRoot -Path $PackageRoot -Root $StagingRoot
+    $pythonRoot = Assert-PathWithinRoot `
+        -Path (Join-Path $packageFull 'runtime\python') `
+        -Root $packageFull
+    if (-not (Test-Path -LiteralPath $pythonRoot -PathType Container)) {
+        throw "Portable Python root is missing: $pythonRoot"
+    }
+
+    $pythonItems = @(Get-ChildItem -LiteralPath $pythonRoot -Recurse -Force)
+    $reparsePoint = $pythonItems |
+        Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint } |
+        Select-Object -First 1
+    if ($null -ne $reparsePoint) {
+        throw "Portable Python cannot contain a symbolic link or junction: $($reparsePoint.FullName)"
+    }
+
+    $bytecodeFiles = @($pythonItems | Where-Object {
+            -not $_.PSIsContainer -and $_.Extension -ieq '.pyc'
+        })
+    foreach ($file in $bytecodeFiles) {
+        $safeFile = Assert-PathWithinRoot -Path $file.FullName -Root $pythonRoot
+        Remove-Item -LiteralPath $safeFile -Force
+    }
+
+    $cacheDirectories = @($pythonItems | Where-Object {
+            $_.PSIsContainer -and $_.Name -ceq '__pycache__'
+        } | Sort-Object { $_.FullName.Length } -Descending)
+    foreach ($directory in $cacheDirectories) {
+        $safeDirectory = Assert-PathWithinRoot -Path $directory.FullName -Root $pythonRoot
+        if ((Split-Path -Leaf $safeDirectory) -cne '__pycache__') {
+            throw "Refusing to remove an unexpected Python cache directory: $safeDirectory"
+        }
+        if (Test-Path -LiteralPath $safeDirectory -PathType Container) {
+            Remove-Item -LiteralPath $safeDirectory -Recurse -Force
+        }
+    }
+
+    $remaining = @(Get-ChildItem -LiteralPath $pythonRoot -Recurse -Force |
+            Where-Object {
+                ($_.PSIsContainer -and $_.Name -ceq '__pycache__') -or
+                (-not $_.PSIsContainer -and $_.Extension -ieq '.pyc')
+            })
+    if ($remaining.Count -gt 0) {
+        throw 'Portable Python bytecode cleanup did not reach the required empty state.'
+    }
+
+    Write-Host (
+        "Excluded Python bytecode from the portable package: " +
+        "$($bytecodeFiles.Count) file(s), $($cacheDirectories.Count) cache directory/directories."
+    ) -ForegroundColor DarkCyan
+}
+
 function Copy-DirectoryContents {
     param(
         [Parameter(Mandatory)][string]$Source,
@@ -768,6 +826,10 @@ try {
             -LockedDependencyManifest $lockedDependencyManifest
         $runtimePrepared = $true
     }
+
+    Remove-PortablePythonBytecode `
+        -PackageRoot $stagingDirectory `
+        -StagingRoot $stagingManagedRoot
 
     $portableMarker = Assert-PathWithinRoot `
         -Path (Join-Path $stagingDirectory 'portable-package.marker') `
