@@ -104,6 +104,8 @@ Describe 'MediaNormalizer.Ui coverage contracts' {
         InModuleScope MediaNormalizer.Ui {
             $rows = [Collections.ArrayList]::new()
             [void]$rows.Add('stale')
+            $timer = [Timers.Timer]::new()
+            $job = Start-Job -ScriptBlock { Start-Sleep -Seconds 30 }
             $state = [pscustomobject]@{
                 Controls = @{
                     Dgv = [pscustomobject]@{ Rows = $rows }
@@ -112,13 +114,27 @@ Describe 'MediaNormalizer.Ui coverage contracts' {
                 ScanValid = $true
                 CachedFiles = @('stale')
                 LogBuffer = [Text.StringBuilder]::new()
+                ProbeTimer = $timer
+                PendingProbeJobs = @{ $job.Id = @('stale.mp4') }
+                ProbeSummary = [pscustomobject]@{ AudioCount = 1; VideoCount = 1; Total = 1; SizeText = '1 KB' }
             }
-            Clear-FileListWithError -State $state -Message '入力が不正です'
-            $rows.Count | Should -Be 0
-            $state.Controls.LblSummary.Text | Should -Be '[エラー] 入力が不正です'
-            $state.ScanValid | Should -BeFalse
-            $state.CachedFiles.Count | Should -Be 0
-            $state.LogBuffer.ToString() | Should -Match '\[ERROR\] 入力が不正です'
+            try {
+                Clear-FileListWithError -State $state -Message '入力が不正です'
+                $rows.Count | Should -Be 0
+                $state.Controls.LblSummary.Text | Should -Be '[エラー] 入力が不正です'
+                $state.ScanValid | Should -BeFalse
+                $state.CachedFiles.Count | Should -Be 0
+                $state.ProbeTimer | Should -BeNullOrEmpty
+                $state.PendingProbeJobs.Count | Should -Be 0
+                $state.ProbeSummary | Should -BeNullOrEmpty
+                $state.LogBuffer.ToString() | Should -Match '\[ERROR\] 入力が不正です'
+            } finally {
+                $leftover = Get-Job -Id $job.Id -ErrorAction SilentlyContinue
+                if ($leftover) {
+                    Stop-Job -Job $leftover -ErrorAction SilentlyContinue
+                    Remove-Job -Job $leftover -Force -ErrorAction SilentlyContinue
+                }
+            }
         }
     }
 
@@ -169,7 +185,8 @@ Describe 'MediaNormalizer.Ui coverage contracts' {
                     NumSpeed = [pscustomobject]@{ Value = 100 }
                 }
             }
-            $result = Get-SpeedPercentMapFromGrid -State $state
+            $result = Get-SpeedPercentMapFromGrid `
+                -State $state -EffectiveTargetPaths @('a.mp3', 'b.mp4')
             $result.Values['a.mp3'] | Should -Be 150
             $result.Values.ContainsKey('c.wav') | Should -BeFalse
             $result.Errors.Count | Should -Be 1
@@ -554,49 +571,52 @@ Describe 'MediaNormalizer.Ui coverage contracts' {
     It 'drains completed probe jobs and updates the summary on Windows' -Tag 'WindowsOnly' -Skip:(-not $IsWindows) {
         InModuleScope MediaNormalizer.Ui {
             Initialize-UiAssemblies
-            $job = Start-Job -ScriptBlock {
-                [pscustomobject]@{ FullName = 'sample.mp4'; Duration = 8.0 }
-            }
-            Wait-Job -Job $job | Out-Null
+            $tmp = Join-Path ([IO.Path]::GetTempPath()) ('mn-probe-latest-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+            $samplePath = 'sample.mp4'
+            $dgv = $null
             try {
+                Mock -ModuleName MediaNormalizer.Ui Get-Job { [pscustomobject]@{ Id = 8101; State = 'Completed' } }
+                Mock -ModuleName MediaNormalizer.Ui Receive-ProbeJobResult { [pscustomobject]@{ FullName = 'sample.mp4'; Duration = 8.0 } }
+                Mock -ModuleName MediaNormalizer.Ui Remove-Job { }
                 $dgv = [Windows.Forms.DataGridView]::new()
-                $durationCell = [pscustomobject]@{ Value = '' }
-                $probeRow = [pscustomobject]@{
-                    IsNewRow = $false
-                    DataGridView = $dgv
-                    Cells = @{ Duration = $durationCell }
+                $dgv.AllowUserToAddRows = $false
+                $audio = [Windows.Forms.DataGridViewCheckBoxColumn]::new(); $audio.Name = 'Audio'; [void]$dgv.Columns.Add($audio)
+                $video = [Windows.Forms.DataGridViewCheckBoxColumn]::new(); $video.Name = 'Video'; [void]$dgv.Columns.Add($video)
+                foreach ($name in @('FileName', 'Ext', 'Size', 'Duration', 'SpeedPercent', 'FullName')) {
+                    [void]$dgv.Columns.Add($name, $name)
                 }
+                $rowIndex = $dgv.Rows.Add($false, $true, 'sample.mp4', '.mp4', '1 KB', '取得中...', 100, $samplePath)
+                $probeRow = $dgv.Rows[$rowIndex]
                 $state = [pscustomobject]@{
-                    PendingProbeJobs = @{ $job.Id = @('sample.mp4') }
+                    PendingProbeJobs = @{ 8101 = @($samplePath) }
                     DurationMap = @{}
-                    FullNameToRow = @{ 'sample.mp4' = $probeRow }
+                    FileIndex = @{ $samplePath = [pscustomobject]@{ FullName = $samplePath; Extension = '.mp4'; Length = 1024L } }
+                    FullNameToRow = @{ $samplePath = $probeRow }
                     ProbeTimer = $null
-                    ProbeSummary = [pscustomobject]@{ AudioCount = 0; VideoCount = 1; Total = 1; SizeText = '1 KB' }
+                    ProbeSummary = $null
+                    ScanValid = $true
                     Controls = @{
                         Dgv = $dgv
+                        ChkAudio = [pscustomobject]@{ Checked = $true }
+                        ChkVideo = [pscustomobject]@{ Checked = $true }
+                        ChkAnalyzeOnly = [pscustomobject]@{ Checked = $false }
                         LblSummary = [pscustomobject]@{ Text = '' }
                         BtnRun = [pscustomobject]@{ Enabled = $false }
                     }
                     RunningProcess = $false
                 }
-                Start-ProbeTimer -State $state
-                for ($i = 0; $i -lt 20 -and $null -ne $state.ProbeTimer; $i++) {
-                    [Windows.Forms.Application]::DoEvents()
-                    Start-Sleep -Milliseconds 120
-                }
+                Update-PendingProbeJobs -State $state
                 $state.ProbeTimer | Should -BeNullOrEmpty
                 $state.PendingProbeJobs.Count | Should -Be 0
-                $state.DurationMap['sample.mp4'] | Should -Be 8
-                $durationCell.Value | Should -Be '0:08'
+                $state.DurationMap[$samplePath] | Should -Be 8
+                $probeRow.Cells['Duration'].Value | Should -Be '0:08'
                 $state.Controls.LblSummary.Text | Should -Match '動画: 1件 / 全 1件'
                 $state.Controls.BtnRun.Enabled | Should -BeTrue
+                $state.ProbeSummary | Should -BeNullOrEmpty
             } finally {
-                $leftover = Get-Job -Id $job.Id -ErrorAction SilentlyContinue
-                if ($leftover) {
-                    Stop-Job -Job $leftover -ErrorAction SilentlyContinue
-                    Remove-Job -Job $leftover -Force -ErrorAction SilentlyContinue
-                }
                 if ($dgv) { $dgv.Dispose() }
+                Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
             }
         }
     }
@@ -607,25 +627,28 @@ Describe 'MediaNormalizer.Ui coverage contracts' {
             $state = [pscustomobject]@{
                 PendingProbeJobs = @{ 654322 = @('missing.mp4') }
                 DurationMap = @{}
+                FileIndex = @{}
                 FullNameToRow = @{}
                 ProbeTimer = $null
-                ProbeSummary = [pscustomobject]@{ AudioCount = 0; VideoCount = 1; Total = 1; SizeText = '1 KB' }
+                ProbeSummary = $null
+                ScanValid = $true
                 Controls = @{
                     Dgv = [Windows.Forms.DataGridView]::new()
+                    ChkAudio = [pscustomobject]@{ Checked = $true }
+                    ChkVideo = [pscustomobject]@{ Checked = $true }
+                    ChkAnalyzeOnly = [pscustomobject]@{ Checked = $false }
                     LblSummary = [pscustomobject]@{ Text = '' }
                     BtnRun = [pscustomobject]@{ Enabled = $false }
                 }
                 RunningProcess = $false
             }
             try {
-                Start-ProbeTimer -State $state
-                for ($i = 0; $i -lt 20 -and $null -ne $state.ProbeTimer; $i++) {
-                    [Windows.Forms.Application]::DoEvents()
-                    Start-Sleep -Milliseconds 100
-                }
+                Mock -ModuleName MediaNormalizer.Ui Get-Job { $null }
+                Update-PendingProbeJobs -State $state
                 $state.ProbeTimer | Should -BeNullOrEmpty
                 $state.PendingProbeJobs.Count | Should -Be 0
                 $state.Controls.BtnRun.Enabled | Should -BeTrue
+                $state.ProbeSummary | Should -BeNullOrEmpty
             } finally {
                 if ($state.ProbeTimer) {
                     $state.ProbeTimer.Stop()
@@ -642,27 +665,30 @@ Describe 'MediaNormalizer.Ui coverage contracts' {
             Initialize-UiAssemblies
             try {
                 Mock -ModuleName MediaNormalizer.Ui Get-Job { [pscustomobject]@{ Id = 999; State = 'Completed' } }
-                Mock -ModuleName MediaNormalizer.Ui Receive-Job { throw 'receive failed' }
+                Mock -ModuleName MediaNormalizer.Ui Receive-ProbeJobResult { throw 'receive failed' }
+                Mock -ModuleName MediaNormalizer.Ui Remove-Job { }
                 $state = [pscustomobject]@{
                     PendingProbeJobs = @{ 999 = @('broken.mp4') }
                     DurationMap = @{}
+                    FileIndex = @{}
                     FullNameToRow = @{}
                     ProbeTimer = $null
-                    ProbeSummary = [pscustomobject]@{ AudioCount = 0; VideoCount = 1; Total = 1; SizeText = '1 KB' }
+                    ProbeSummary = $null
+                    ScanValid = $true
                     Controls = @{
                         Dgv = [Windows.Forms.DataGridView]::new()
+                        ChkAudio = [pscustomobject]@{ Checked = $true }
+                        ChkVideo = [pscustomobject]@{ Checked = $true }
+                        ChkAnalyzeOnly = [pscustomobject]@{ Checked = $false }
                         LblSummary = [pscustomobject]@{ Text = '' }
                         BtnRun = [pscustomobject]@{ Enabled = $false }
                     }
                     RunningProcess = $false
                 }
-                Start-ProbeTimer -State $state
-                for ($i = 0; $i -lt 20 -and $null -ne $state.ProbeTimer; $i++) {
-                    [Windows.Forms.Application]::DoEvents()
-                    Start-Sleep -Milliseconds 100
-                }
+                Update-PendingProbeJobs -State $state
                 $state.ProbeTimer | Should -BeNullOrEmpty
                 $state.PendingProbeJobs.Count | Should -Be 0
+                $state.ProbeSummary | Should -BeNullOrEmpty
             } finally {
                 if ($state -and $state.Controls.Dgv) { $state.Controls.Dgv.Dispose() }
             }

@@ -523,6 +523,10 @@ function Initialize-UiState {
     Add-Member -InputObject $State -NotePropertyName 'Presets' -NotePropertyValue @{} -Force
     Add-Member -InputObject $State -NotePropertyName 'InputSelectionPaths' -NotePropertyValue @() -Force
     Add-Member -InputObject $State -NotePropertyName 'ApplyingInputSelection' -NotePropertyValue $false -Force
+    Add-Member -InputObject $State -NotePropertyName 'FileRowState' -NotePropertyValue @{} -Force
+    Add-Member -InputObject $State -NotePropertyName 'InputScopeKey' -NotePropertyValue $null -Force
+    Add-Member -InputObject $State -NotePropertyName 'FileGridUpdateDepth' -NotePropertyValue 0 -Force
+    Add-Member -InputObject $State -NotePropertyName 'FileGridModeRefreshPending' -NotePropertyValue $false -Force
 
     # HasThreadJob は Core State 既存。Initialize-ThreadJob の結果を代入する。
     $State.HasThreadJob = Initialize-ThreadJob -State $State
@@ -686,6 +690,119 @@ function Get-TargetExtensions {
     return $result
 }
 
+function Initialize-FileGridSelectionState {
+    param([Parameter(Mandatory)][pscustomobject]$State)
+
+    $defaults = @{
+        FileRowState               = @{}
+        InputScopeKey              = $null
+        FileGridUpdateDepth        = 0
+        FileGridModeRefreshPending = $false
+        InputSelectionPaths        = @()
+    }
+    foreach ($entry in $defaults.GetEnumerator()) {
+        $property = $State.PSObject.Properties[[string]$entry.Key]
+        if ($null -eq $property) {
+            Add-Member -InputObject $State -NotePropertyName $entry.Key -NotePropertyValue $entry.Value
+        } elseif ($null -eq $property.Value -and $entry.Key -ne 'InputScopeKey') {
+            $property.Value = $entry.Value
+        }
+    }
+    return $State
+}
+
+function Get-FileRowStateKey {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $root = [IO.Path]::GetPathRoot($fullPath)
+    if ($fullPath.Length -gt $root.Length) {
+        $fullPath = $fullPath.TrimEnd([char[]]@('\', '/'))
+    }
+    return $fullPath.ToUpperInvariant()
+}
+
+function Get-InputScopeKey {
+    [CmdletBinding()]
+    param([AllowNull()][string[]]$Paths)
+
+    $unique = @{}
+    foreach ($path in @($Paths)) {
+        $key = Get-FileRowStateKey -Path ([string]$path)
+        if ($key) { $unique[$key] = $true }
+    }
+    return (@($unique.Keys | Sort-Object) -join "`n")
+}
+
+function Get-InputFormatExtensions {
+    return @{
+        Audio = @(MediaNormalizer.Core\Get-AudioInputExtensions)
+        Video = @(MediaNormalizer.Core\Get-VideoInputExtensions)
+    }
+}
+
+function Save-FileGridSelectionStateFromGrid {
+    param([Parameter(Mandatory)][pscustomobject]$State)
+
+    Initialize-FileGridSelectionState -State $State | Out-Null
+    $dgv = $State.Controls.Dgv
+    $formatMap = Get-InputFormatExtensions
+    $audioMode = $false
+    $videoMode = $false
+    if ($State.Controls.ContainsKey('ChkAudio')) { $audioMode = [bool]$State.Controls.ChkAudio.Checked }
+    if ($State.Controls.ContainsKey('ChkVideo')) { $videoMode = [bool]$State.Controls.ChkVideo.Checked }
+
+    foreach ($row in $dgv.Rows) {
+        if ($row.PSObject.Properties['IsNewRow'] -and $row.IsNewRow) { continue }
+        $fullName = [string]$row.Cells['FullName'].Value
+        if ([string]::IsNullOrWhiteSpace($fullName)) { continue }
+        $key = Get-FileRowStateKey -Path $fullName
+        $existing = if ($State.FileRowState.ContainsKey($key)) { $State.FileRowState[$key] } else { $null }
+        $supportsAudio = $false
+        $supportsVideo = $false
+        if ($existing) {
+            $supportsAudio = [bool]$existing.SupportsAudio
+            $supportsVideo = [bool]$existing.SupportsVideo
+        } elseif ($State.PSObject.Properties['FileIndex'] -and $State.FileIndex.ContainsKey($fullName)) {
+            $file = $State.FileIndex[$fullName]
+            $ext = $file.Extension.ToLowerInvariant()
+            $supportsAudio = $ext -in $formatMap.Audio
+            $supportsVideo = $ext -in $formatMap.Video
+        }
+
+        $desiredAudio = if ($existing) { [bool]$existing.DesiredAudio } else { $supportsAudio }
+        $desiredVideo = if ($existing) { [bool]$existing.DesiredVideo } else { $supportsVideo }
+        if ($audioMode -and $supportsAudio) { $desiredAudio = ($row.Cells['Audio'].Value -eq $true) }
+        if ($videoMode -and $supportsVideo) { $desiredVideo = ($row.Cells['Video'].Value -eq $true) }
+        $speed = if ($existing) { $existing.SpeedPercent } else { 100 }
+        if ($row.Cells['SpeedPercent'] -and $null -ne $row.Cells['SpeedPercent'].Value) {
+            $speed = $row.Cells['SpeedPercent'].Value
+        }
+        $State.FileRowState[$key] = [pscustomobject]@{
+            SupportsAudio = $supportsAudio
+            SupportsVideo = $supportsVideo
+            DesiredAudio  = $desiredAudio
+            DesiredVideo  = $desiredVideo
+            SpeedPercent  = $speed
+        }
+    }
+}
+
+function Save-FileGridSelectionStateFromRow {
+    param(
+        [Parameter(Mandatory)][pscustomobject]$State,
+        [Parameter(Mandatory)]$Row
+    )
+
+    Initialize-FileGridSelectionState -State $State | Out-Null
+    if ($Row.PSObject.Properties['IsNewRow'] -and $Row.IsNewRow) { return }
+    $fullName = [string]$Row.Cells['FullName'].Value
+    if ([string]::IsNullOrWhiteSpace($fullName)) { return }
+    Save-FileGridSelectionStateFromGrid -State $State
+}
+
 function Get-FileClassification {
     # ExtMap のみで完結する純粋関数のため State 引数は不要。
     param(
@@ -754,21 +871,31 @@ function Set-UIEnabled {
 
 function Clear-FileListWithError {
     param([Parameter(Mandatory)][pscustomobject]$State, [string]$Message)
+    Initialize-FileGridSelectionState -State $State | Out-Null
+    Stop-PendingProbeJobs -State $State
     $State.Controls.Dgv.Rows.Clear()
     $State.Controls.LblSummary.Text = "[エラー] $Message"
     $State.ScanValid = $false
     $State.CachedFiles = @()
+    $State.FileRowState = @{}
+    $State.InputScopeKey = $null
+    if ($State.PSObject.Properties['ProbeSummary']) {
+        $State.ProbeSummary = $null
+    } else {
+        Add-Member -InputObject $State -NotePropertyName 'ProbeSummary' -NotePropertyValue $null
+    }
     Write-Log -State $State -Message "[ERROR] $Message"
 }
 
 function Stop-PendingProbeJobs {
     param([Parameter(Mandatory)][pscustomobject]$State)
-    if ($State.ProbeTimer) {
+    if ($State.PSObject.Properties['ProbeTimer'] -and $State.ProbeTimer) {
         try { $State.ProbeTimer.Stop() } catch { }
         try { $State.ProbeTimer.Dispose() } catch { }
         $State.ProbeTimer = $null
     }
-    if ($State.PendingProbeJobs -and $State.PendingProbeJobs.Count -gt 0) {
+    if ($State.PSObject.Properties['PendingProbeJobs'] -and
+        $State.PendingProbeJobs -and $State.PendingProbeJobs.Count -gt 0) {
         foreach ($jobId in @($State.PendingProbeJobs.Keys)) {
             $job = Get-Job -Id $jobId -ErrorAction SilentlyContinue
             if ($job) {
@@ -781,107 +908,441 @@ function Stop-PendingProbeJobs {
 }
 
 function Update-FileGrid {
-    param([Parameter(Mandatory)][pscustomobject]$State)
-    # 既存の probe を停止してから再構築する（チェックボックス切替・再スキャン時）
-    Stop-PendingProbeJobs -State $State
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$State,
+        [AllowNull()][string]$InputScopeKey
+    )
 
+    Initialize-FileGridSelectionState -State $State | Out-Null
+    $hasExplicitScope = $PSBoundParameters.ContainsKey('InputScopeKey')
+    $scopeChanged = $hasExplicitScope -and
+        -not [string]::Equals([string]$State.InputScopeKey, [string]$InputScopeKey, [StringComparison]::Ordinal)
     $dgv = $State.Controls.Dgv
-    $dgv.Rows.Clear()
-    $State.DurationMap = @{}
-    $State.FileIndex = @{}            # FullName -> FileInfo の O(1) 索引
-    $State.FullNameToRow = @{}        # FullName -> DataGridViewRow の O(1) 索引（ProbeTimer 用）
-    $extMap = Get-TargetExtensions -State $State
-    $audioCount = 0; $videoCount = 0; $targetSize = 0L; $totalSize = 0L
-    $totalDur = 0.0
-    $fileCount = $State.CachedFiles.Count
-    $useAsync = [bool]$State.HasThreadJob
-
-    for ($i = 0; $i -lt $fileCount; $i++) {
-        $f = $State.CachedFiles[$i]
-        $cls = Get-FileClassification -File $f -ExtMap $extMap
-        $chkA = ($cls -eq 'audio' -or $cls -eq 'both')
-        $chkV = ($cls -eq 'video' -or $cls -eq 'both')
-
-        $State.FileIndex[$f.FullName] = $f
-        $totalSize += $f.Length
-        if ($cls -ne 'none') { $targetSize += $f.Length }
-        if ($chkA) { $audioCount++ }
-        if ($chkV) { $videoCount++ }
-
-        $initialDurStr = if ($useAsync) { '取得中...' } else {
-            $dur = MediaNormalizer.Probe\Get-MediaDuration -State $State -FilePath $f.FullName
-            $State.DurationMap[$f.FullName] = $dur
-            if ($dur -gt 0) { $totalDur += $dur }
-            MediaNormalizer.Probe\Format-Duration -Seconds $dur
-        }
-
-        $sizeStr = MediaNormalizer.Probe\Format-FileSize -Bytes $f.Length
-        $speedPercent = 100
-        if ($State.Controls.ContainsKey('NumSpeed')) { $speedPercent = [int]$State.Controls.NumSpeed.Value }
-        $displayName = $f.Name
-        $inputRoot = $State.Controls.TxtInput.Text.Trim()
-        if (Test-Path -LiteralPath $inputRoot -PathType Container) {
-            $relativeName = MediaNormalizer.Core\Get-RelativeMediaPath `
-                -BasePath $inputRoot `
-                -Path $f.FullName
-            if ($relativeName) { $displayName = $relativeName }
-        }
-        $rowIdx = $dgv.Rows.Add($chkA, $chkV, $displayName, $f.Extension.ToLower(), $sizeStr, $initialDurStr, $speedPercent, $f.FullName)
-        $row = $dgv.Rows[$rowIdx]
-        $State.FullNameToRow[$f.FullName] = $row
-        if ($cls -eq 'none') {
-            $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::Gray
-            $row.Cells['Audio'].ReadOnly = $true
-            $row.Cells['Video'].ReadOnly = $true
-        }
-
-        if (-not $useAsync -or ($i + 1) % 5 -eq 0) {
-            $State.Controls.LblSummary.Text = "スキャン中... $($i + 1) / $fileCount"
-            [System.Windows.Forms.Application]::DoEvents()
-        }
+    if ($dgv.PSObject.Methods['EndEdit']) { [void]$dgv.EndEdit() }
+    if ($scopeChanged) {
+        $State.FileRowState = @{}
+        $State.InputScopeKey = $InputScopeKey
+    } else {
+        Save-FileGridSelectionStateFromGrid -State $State
+        if ($hasExplicitScope) { $State.InputScopeKey = $InputScopeKey }
     }
 
-    if ($useAsync -and $fileCount -gt 0) {
-        $probePaths = @($State.CachedFiles | ForEach-Object FullName)
-        foreach ($batch in @(Split-ProbePathBatch -FilePath $probePaths -BatchSize $script:ProbeBatchSize)) {
-            try {
-                $job = Start-ThreadJob `
-                    -ScriptBlock $script:ProbeBatchScriptBlock `
-                    -ArgumentList $State.ProbeScript, @($batch) `
-                    -ThrottleLimit 4
-                $State.PendingProbeJobs[$job.Id] = @($batch)
-            } catch {
-                foreach ($fullName in @($batch)) {
-                    $dur = MediaNormalizer.Probe\Get-MediaDuration -State $State -FilePath $fullName
-                    $State.DurationMap[$fullName] = $dur
-                    if ($State.FullNameToRow.ContainsKey($fullName)) {
-                        $State.FullNameToRow[$fullName].Cells['Duration'].Value =
-                            MediaNormalizer.Probe\Format-Duration -Seconds $dur
+    $State.FileGridUpdateDepth++
+    $completed = $false
+    try {
+        Stop-PendingProbeJobs -State $State
+        $dgv.Rows.Clear()
+        $State.DurationMap = @{}
+        $State.FileIndex = @{}            # FullName -> FileInfo の O(1) 索引
+        $State.FullNameToRow = @{}        # FullName -> DataGridViewRow の O(1) 索引（ProbeTimer 用）
+        $formatMap = Get-InputFormatExtensions
+        $audioMode = $false
+        $videoMode = $false
+        if ($State.Controls.ContainsKey('ChkAudio')) { $audioMode = [bool]$State.Controls.ChkAudio.Checked }
+        if ($State.Controls.ContainsKey('ChkVideo')) { $videoMode = [bool]$State.Controls.ChkVideo.Checked }
+        $fileCount = @($State.CachedFiles).Count
+        $useAsync = [bool]$State.HasThreadJob
+        $defaultSpeed = 100
+        if ($State.Controls.ContainsKey('NumSpeed')) { $defaultSpeed = [int]$State.Controls.NumSpeed.Value }
+
+        for ($i = 0; $i -lt $fileCount; $i++) {
+            $f = $State.CachedFiles[$i]
+            $key = Get-FileRowStateKey -Path $f.FullName
+            $ext = $f.Extension.ToLowerInvariant()
+            $supportsAudio = $ext -in $formatMap.Audio
+            $supportsVideo = $ext -in $formatMap.Video
+            $saved = if ($State.FileRowState.ContainsKey($key)) { $State.FileRowState[$key] } else { $null }
+            $rowState = if ($saved) {
+                [pscustomobject]@{
+                    SupportsAudio = $supportsAudio
+                    SupportsVideo = $supportsVideo
+                    DesiredAudio  = [bool]$saved.DesiredAudio
+                    DesiredVideo  = [bool]$saved.DesiredVideo
+                    SpeedPercent  = $saved.SpeedPercent
+                }
+            } else {
+                [pscustomobject]@{
+                    SupportsAudio = $supportsAudio
+                    SupportsVideo = $supportsVideo
+                    DesiredAudio  = $supportsAudio
+                    DesiredVideo  = $supportsVideo
+                    SpeedPercent  = $defaultSpeed
+                }
+            }
+            $State.FileRowState[$key] = $rowState
+            $chkA = $audioMode -and $supportsAudio -and $rowState.DesiredAudio
+            $chkV = $videoMode -and $supportsVideo -and $rowState.DesiredVideo
+
+            $State.FileIndex[$f.FullName] = $f
+            $initialDurStr = if ($useAsync) { '取得中...' } else {
+                $dur = MediaNormalizer.Probe\Get-MediaDuration -State $State -FilePath $f.FullName
+                $State.DurationMap[$f.FullName] = $dur
+                MediaNormalizer.Probe\Format-Duration -Seconds $dur
+            }
+
+            $sizeStr = MediaNormalizer.Probe\Format-FileSize -Bytes $f.Length
+            $displayName = $f.Name
+            $inputRoot = $State.Controls.TxtInput.Text.Trim()
+            if (Test-Path -LiteralPath $inputRoot -PathType Container) {
+                $relativeName = MediaNormalizer.Core\Get-RelativeMediaPath `
+                    -BasePath $inputRoot `
+                    -Path $f.FullName
+                if ($relativeName) { $displayName = $relativeName }
+            }
+            $rowIdx = $dgv.Rows.Add(
+                $chkA, $chkV, $displayName, $ext, $sizeStr, $initialDurStr,
+                $rowState.SpeedPercent, $f.FullName)
+            $row = $dgv.Rows[$rowIdx]
+            $State.FullNameToRow[$f.FullName] = $row
+            $row.Cells['Audio'].ReadOnly = -not ($audioMode -and $supportsAudio)
+            $row.Cells['Video'].ReadOnly = -not ($videoMode -and $supportsVideo)
+            if (-not $supportsAudio -and -not $supportsVideo) {
+                $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::Gray
+            }
+
+            if (-not $useAsync -or ($i + 1) % 5 -eq 0) {
+                $State.Controls.LblSummary.Text = "スキャン中... $($i + 1) / $fileCount"
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+        }
+
+        if ($useAsync -and $fileCount -gt 0) {
+            $probePaths = @($State.CachedFiles | ForEach-Object FullName)
+            foreach ($batch in @(Split-ProbePathBatch -FilePath $probePaths -BatchSize $script:ProbeBatchSize)) {
+                try {
+                    $job = Start-ThreadJob `
+                        -ScriptBlock $script:ProbeBatchScriptBlock `
+                        -ArgumentList $State.ProbeScript, @($batch) `
+                        -ThrottleLimit 4
+                    $State.PendingProbeJobs[$job.Id] = @($batch)
+                } catch {
+                    foreach ($fullName in @($batch)) {
+                        $dur = MediaNormalizer.Probe\Get-MediaDuration -State $State -FilePath $fullName
+                        $State.DurationMap[$fullName] = $dur
+                        if ($State.FullNameToRow.ContainsKey($fullName)) {
+                            $State.FullNameToRow[$fullName].Cells['Duration'].Value =
+                                MediaNormalizer.Probe\Format-Duration -Seconds $dur
+                        }
                     }
-                    if ($dur -gt 0) { $totalDur += $dur }
                 }
             }
         }
+
+        $State.ProbeSummary = $null
+        if ($useAsync -and $State.PendingProbeJobs.Count -gt 0) {
+            if ($State.Controls.BtnRun) { $State.Controls.BtnRun.Enabled = $false }
+            Start-ProbeTimer -State $State
+        } else {
+            if ($State.Controls.BtnRun -and -not $State.RunningProcess) {
+                $State.Controls.BtnRun.Enabled = $true
+            }
+        }
+        $completed = $true
+    } finally {
+        $State.FileGridUpdateDepth = [math]::Max(0, [int]$State.FileGridUpdateDepth - 1)
+        if (-not $completed) { $State.FileGridModeRefreshPending = $false }
     }
 
-    $total = $fileCount
-    $sizeText = "対象合計 $(MediaNormalizer.Probe\Format-FileSize -Bytes $targetSize) / 全体 $(MediaNormalizer.Probe\Format-FileSize -Bytes $totalSize)"
-    if ($useAsync -and $State.PendingProbeJobs.Count -gt 0) {
-        $State.Controls.LblSummary.Text = "音声: ${audioCount}件 / 動画: ${videoCount}件 / 全 ${total}件 ($sizeText / 再生時間 計算中...)"
-        $State.ProbeSummary = [pscustomobject]@{
-            AudioCount = $audioCount
-            VideoCount = $videoCount
-            Total      = $total
-            SizeText   = $sizeText
+    if ($completed -and $State.FileGridUpdateDepth -eq 0) {
+        if ($State.FileGridModeRefreshPending) {
+            $State.FileGridModeRefreshPending = $false
+            Update-FileGridModeState -State $State
+        } else {
+            Update-FileGridSummary -State $State
         }
-        # プローブ完了までは「実行」を無効化（残時間 ETA を確定 Duration ベースで計算するため）
-        if ($State.Controls.BtnRun) { $State.Controls.BtnRun.Enabled = $false }
-        Start-ProbeTimer -State $State
-    } else {
-        $durDisplay = if ($totalDur -gt 0) { " / 合計再生時間 $(MediaNormalizer.Probe\Format-Duration -Seconds $totalDur)" } else { '' }
-        $State.Controls.LblSummary.Text = "音声: ${audioCount}件 / 動画: ${videoCount}件 / 全 ${total}件 ($sizeText$durDisplay)"
-        # 前回の非同期プローブで無効化された可能性があるため、Duration が同期で揃っているなら明示的に再有効化
-        if ($State.Controls.BtnRun -and -not $State.RunningProcess) {
+    }
+}
+
+function Update-FileGridModeState {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][pscustomobject]$State)
+
+    Initialize-FileGridSelectionState -State $State | Out-Null
+    if ($State.FileGridUpdateDepth -gt 0) {
+        $State.FileGridModeRefreshPending = $true
+        return
+    }
+
+    $State.FileGridUpdateDepth++
+    $completed = $false
+    try {
+        $formatMap = Get-InputFormatExtensions
+        $audioMode = [bool]$State.Controls.ChkAudio.Checked
+        $videoMode = [bool]$State.Controls.ChkVideo.Checked
+        foreach ($row in $State.Controls.Dgv.Rows) {
+            if ($row.PSObject.Properties['IsNewRow'] -and $row.IsNewRow) { continue }
+            $fullName = [string]$row.Cells['FullName'].Value
+            if ([string]::IsNullOrWhiteSpace($fullName)) { continue }
+            $key = Get-FileRowStateKey -Path $fullName
+            $saved = if ($State.FileRowState.ContainsKey($key)) { $State.FileRowState[$key] } else { $null }
+            $file = if ($State.PSObject.Properties['FileIndex'] -and $State.FileIndex.ContainsKey($fullName)) {
+                $State.FileIndex[$fullName]
+            } else { $null }
+            $ext = if ($file) { $file.Extension.ToLowerInvariant() } else { [IO.Path]::GetExtension($fullName).ToLowerInvariant() }
+            $supportsAudio = if ($saved) { [bool]$saved.SupportsAudio } else { $ext -in $formatMap.Audio }
+            $supportsVideo = if ($saved) { [bool]$saved.SupportsVideo } else { $ext -in $formatMap.Video }
+            $desiredAudio = if ($saved) { [bool]$saved.DesiredAudio } else { $supportsAudio }
+            $desiredVideo = if ($saved) { [bool]$saved.DesiredVideo } else { $supportsVideo }
+            $speed = if ($saved) { $saved.SpeedPercent } else { 100 }
+            $State.FileRowState[$key] = [pscustomobject]@{
+                SupportsAudio = $supportsAudio
+                SupportsVideo = $supportsVideo
+                DesiredAudio  = $desiredAudio
+                DesiredVideo  = $desiredVideo
+                SpeedPercent  = $speed
+            }
+            $row.Cells['Audio'].Value = $audioMode -and $supportsAudio -and $desiredAudio
+            $row.Cells['Video'].Value = $videoMode -and $supportsVideo -and $desiredVideo
+            $row.Cells['Audio'].ReadOnly = -not ($audioMode -and $supportsAudio)
+            $row.Cells['Video'].ReadOnly = -not ($videoMode -and $supportsVideo)
+            if (-not $supportsAudio -and -not $supportsVideo) {
+                $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::Gray
+            } else {
+                $row.DefaultCellStyle.ForeColor = [System.Drawing.SystemColors]::ControlText
+            }
+        }
+        $completed = $true
+    } finally {
+        $State.FileGridUpdateDepth = [math]::Max(0, [int]$State.FileGridUpdateDepth - 1)
+    }
+    if ($completed -and $State.FileGridUpdateDepth -eq 0) {
+        Update-FileGridSummary -State $State
+    }
+}
+
+function ConvertTo-FileGridSelectionRecord {
+    param([Parameter(Mandatory)][pscustomobject]$State)
+
+    Initialize-FileGridSelectionState -State $State | Out-Null
+    $records = [Collections.Generic.List[object]]::new()
+    $errors = [Collections.Generic.List[string]]::new()
+    $formatMap = Get-InputFormatExtensions
+    foreach ($row in $State.Controls.Dgv.Rows) {
+        if ($row.PSObject.Properties['IsNewRow'] -and $row.IsNewRow) { continue }
+        $fullName = [string]$row.Cells['FullName'].Value
+        if ([string]::IsNullOrWhiteSpace($fullName)) {
+            $errors.Add('ファイル一覧の行にフルパスがありません。')
+            continue
+        }
+        $fileIndex = if ($State.PSObject.Properties['FileIndex']) { $State.FileIndex } else { @{} }
+        if (-not $fileIndex.ContainsKey($fullName)) {
+            $errors.Add("ファイル一覧の索引にありません: $fullName")
+            continue
+        }
+        $file = $fileIndex[$fullName]
+        if (-not [string]::Equals(
+                (Get-FileRowStateKey -Path $fullName),
+                (Get-FileRowStateKey -Path $file.FullName),
+                [StringComparison]::Ordinal)) {
+            $errors.Add("ファイル一覧と索引のパスが一致しません: $fullName")
+            continue
+        }
+        $key = Get-FileRowStateKey -Path $fullName
+        $saved = if ($State.FileRowState.ContainsKey($key)) { $State.FileRowState[$key] } else { $null }
+        $ext = $file.Extension.ToLowerInvariant()
+        $supportsAudio = if ($saved) { [bool]$saved.SupportsAudio } else { $ext -in $formatMap.Audio }
+        $supportsVideo = if ($saved) { [bool]$saved.SupportsVideo } else { $ext -in $formatMap.Video }
+        $durationMap = if ($State.PSObject.Properties['DurationMap']) { $State.DurationMap } else { @{} }
+        $duration = if ($durationMap.ContainsKey($fullName)) { [double]$durationMap[$fullName] } else { -1.0 }
+        $records.Add([pscustomobject]@{
+            FullName       = $fullName
+            File           = $file
+            SupportsAudio  = $supportsAudio
+            SupportsVideo  = $supportsVideo
+            AudioSelected  = ($row.Cells['Audio'].Value -eq $true)
+            VideoSelected  = ($row.Cells['Video'].Value -eq $true)
+            SpeedPercent   = $row.Cells['SpeedPercent'].Value
+            Size           = [long]$file.Length
+            Duration       = $duration
+            DisplayName    = [string]$row.Cells['FileName'].Value
+        })
+    }
+    return [pscustomobject]@{
+        Records = @($records.ToArray())
+        Errors  = @($errors.ToArray())
+    }
+}
+
+function Get-FileSelectionSnapshotFromRecord {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][object[]]$Records,
+        [bool]$AudioEnabled,
+        [bool]$VideoEnabled,
+        [bool]$AnalyzeOnly
+    )
+
+    $audioFiles = [Collections.Generic.List[object]]::new()
+    $videoFiles = [Collections.Generic.List[object]]::new()
+    $audioPaths = @{}
+    $videoPaths = @{}
+    $selectedFiles = @{}
+    $allFiles = @{}
+    $errors = [Collections.Generic.List[string]]::new()
+    foreach ($record in @($Records)) {
+        if ($null -eq $record) { continue }
+        $path = [string]$record.FullName
+        if ([string]::IsNullOrWhiteSpace($path)) {
+            $errors.Add('選択レコードのフルパスが空です。')
+            continue
+        }
+        $key = Get-FileRowStateKey -Path $path
+        if (-not $allFiles.ContainsKey($key)) { $allFiles[$key] = $record }
+        $selectAudio = $AudioEnabled -and [bool]$record.SupportsAudio -and [bool]$record.AudioSelected
+        $selectVideo = $VideoEnabled -and [bool]$record.SupportsVideo -and [bool]$record.VideoSelected
+        if ($selectAudio -and -not $audioPaths.ContainsKey($key)) {
+            $audioPaths[$key] = $true
+            [void]$audioFiles.Add($record.File)
+        }
+        if ($selectVideo -and -not $videoPaths.ContainsKey($key)) {
+            $videoPaths[$key] = $true
+            [void]$videoFiles.Add($record.File)
+        }
+        if (($selectAudio -or $selectVideo) -and -not $selectedFiles.ContainsKey($key)) {
+            $selectedFiles[$key] = $record
+        }
+    }
+
+    $executionVideoFiles = if ($AnalyzeOnly -and $audioFiles.Count -gt 0) { @() } else { @($videoFiles.ToArray()) }
+    $executionPaths = @{}
+    foreach ($file in @($audioFiles.ToArray()) + @($executionVideoFiles)) {
+        if ($file) { $executionPaths[(Get-FileRowStateKey -Path $file.FullName)] = $true }
+    }
+    $selectedSize = 0L
+    $selectedDuration = 0.0
+    foreach ($record in $selectedFiles.Values) {
+        $selectedSize += [long]$record.Size
+        if ([double]$record.Duration -gt 0) { $selectedDuration += [double]$record.Duration }
+    }
+    $allSize = 0L
+    foreach ($record in $allFiles.Values) { $allSize += [long]$record.Size }
+
+    return [pscustomobject]@{
+        AudioFiles          = @($audioFiles.ToArray())
+        VideoFiles          = @($videoFiles.ToArray())
+        ExecutionAudioFiles = @($audioFiles.ToArray())
+        ExecutionVideoFiles = @($executionVideoFiles)
+        AudioCount          = $audioFiles.Count
+        VideoCount          = $videoFiles.Count
+        ExecutionCount      = $audioFiles.Count + @($executionVideoFiles).Count
+        SelectedPaths       = @($selectedFiles.Keys)
+        ExecutionPaths      = @($executionPaths.Keys)
+        SelectedSize        = $selectedSize
+        AllSize             = $allSize
+        SelectedDurationSec = $selectedDuration
+        TotalFiles          = $allFiles.Count
+        Errors              = @($errors.ToArray())
+    }
+}
+
+function Get-FileGridSelectionSnapshot {
+    param([Parameter(Mandatory)][pscustomobject]$State)
+
+    Initialize-FileGridSelectionState -State $State | Out-Null
+    $adapter = ConvertTo-FileGridSelectionRecord -State $State
+    $audioEnabled = $false
+    $videoEnabled = $false
+    $analyzeOnly = $false
+    if ($State.Controls.ContainsKey('ChkAudio')) { $audioEnabled = [bool]$State.Controls.ChkAudio.Checked }
+    if ($State.Controls.ContainsKey('ChkVideo')) { $videoEnabled = [bool]$State.Controls.ChkVideo.Checked }
+    if ($State.Controls.ContainsKey('ChkAnalyzeOnly')) { $analyzeOnly = [bool]$State.Controls.ChkAnalyzeOnly.Checked }
+    $snapshot = Get-FileSelectionSnapshotFromRecord `
+        -Records $adapter.Records `
+        -AudioEnabled:$audioEnabled `
+        -VideoEnabled:$videoEnabled `
+        -AnalyzeOnly:$analyzeOnly
+    $allErrors = @($adapter.Errors) + @($snapshot.Errors)
+    $snapshot.Errors = @($allErrors)
+    Add-Member -InputObject $snapshot -NotePropertyName 'HasPendingProbe' -NotePropertyValue (
+        $State.PSObject.Properties['PendingProbeJobs'] -and
+        $State.PendingProbeJobs -and $State.PendingProbeJobs.Count -gt 0) -Force
+    return $snapshot
+}
+
+function Update-FileGridSummary {
+    param([Parameter(Mandatory)][pscustomobject]$State)
+
+    if (-not $State.Controls.ContainsKey('LblSummary')) { return }
+    if ($State.PSObject.Properties['ScanValid'] -and -not $State.ScanValid) { return }
+    $snapshot = Get-FileGridSelectionSnapshot -State $State
+    if ($snapshot.Errors.Count -gt 0) {
+        $State.Controls.LblSummary.Text = '[エラー] ファイル一覧の状態を検証できません'
+        return
+    }
+    $sizeText = "対象合計 $(MediaNormalizer.Probe\Format-FileSize -Bytes $snapshot.SelectedSize) / 全体 $(MediaNormalizer.Probe\Format-FileSize -Bytes $snapshot.AllSize)"
+    $durationText = if ($snapshot.HasPendingProbe) {
+        ' / 再生時間 計算中...'
+    } elseif ($snapshot.SelectedDurationSec -gt 0) {
+        " / 合計再生時間 $(MediaNormalizer.Probe\Format-Duration -Seconds $snapshot.SelectedDurationSec)"
+    } else { '' }
+    $State.Controls.LblSummary.Text = "音声: $($snapshot.AudioCount)件 / 動画: $($snapshot.VideoCount)件 / 全 $($snapshot.TotalFiles)件 ($sizeText$durationText)"
+}
+
+function Receive-ProbeJobResult {
+    param([Parameter(Mandatory)]$Job)
+
+    return @(Receive-Job -Job $Job -ErrorAction Stop)
+}
+
+function Update-PendingProbeJobs {
+    param([Parameter(Mandatory)][pscustomobject]$State)
+
+    $dgv = $State.Controls.Dgv
+    $completedIds = @()
+    foreach ($jobId in @($State.PendingProbeJobs.Keys)) {
+        $job = Get-Job -Id $jobId -ErrorAction SilentlyContinue
+        if (-not $job) { $completedIds += $jobId; continue }
+        if ($job.State -in @('Completed', 'Failed', 'Stopped')) {
+            $expectedPaths = @($State.PendingProbeJobs[$jobId])
+            $results = @()
+            if ($job.State -eq 'Completed') {
+                try {
+                    $results = @(Receive-ProbeJobResult -Job $job)
+                } catch { $results = @() }
+            }
+            try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch { }
+            $resultMap = @{}
+            foreach ($result in $results) {
+                if ($result -and $result.PSObject.Properties['FullName']) {
+                    $resultMap[[string]$result.FullName] = [double]$result.Duration
+                }
+            }
+            foreach ($fullName in $expectedPaths) {
+                $dur = if ($resultMap.ContainsKey($fullName)) { $resultMap[$fullName] } else { -1.0 }
+                $State.DurationMap[$fullName] = $dur
+                if ($State.FullNameToRow.ContainsKey($fullName)) {
+                    $row = $State.FullNameToRow[$fullName]
+                    # 行が DataGridView から外されていないか防衛（Rows.Clear / 再構築直後の競合対策）
+                    if ($row -and -not $row.IsNewRow -and $row.DataGridView -eq $dgv) {
+                        try {
+                            $row.Cells['Duration'].Value = MediaNormalizer.Probe\Format-Duration -Seconds $dur
+                        } catch {
+                            # 行 Dispose 等で書き込みに失敗した場合は無視
+                        }
+                    }
+                }
+            }
+            $completedIds += $jobId
+        }
+    }
+    foreach ($id in $completedIds) { [void]$State.PendingProbeJobs.Remove($id) }
+
+    if ($State.PendingProbeJobs.Count -eq 0) {
+        try { $State.ProbeTimer.Stop() } catch { }
+        try { $State.ProbeTimer.Dispose() } catch { }
+        $State.ProbeTimer = $null
+
+        $scanValid = -not $State.PSObject.Properties['ScanValid'] -or [bool]$State.ScanValid
+        $hasSnapshotInputs = $State.PSObject.Properties['FileIndex'] -and
+            $State.Controls.ContainsKey('ChkAudio') -and $State.Controls.ContainsKey('ChkVideo')
+        if ($scanValid -and $hasSnapshotInputs) {
+            Update-FileGridSummary -State $State
+        }
+        $State.ProbeSummary = $null
+
+        # プローブ完了で「実行」を再有効化。ただし実行中（CancelRequested を待っている状態）は触らない
+        if ($scanValid -and $State.Controls.BtnRun -and -not $State.RunningProcess) {
             $State.Controls.BtnRun.Enabled = $true
         }
     }
@@ -892,73 +1353,14 @@ function Start-ProbeTimer {
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = 100
     $stateRef = $State
-    $timer.Add_Tick({
-        $st = $stateRef
-        $dgv = $st.Controls.Dgv
-        $completedIds = @()
-        foreach ($jobId in @($st.PendingProbeJobs.Keys)) {
-            $job = Get-Job -Id $jobId -ErrorAction SilentlyContinue
-            if (-not $job) { $completedIds += $jobId; continue }
-            if ($job.State -in @('Completed','Failed','Stopped')) {
-                $expectedPaths = @($st.PendingProbeJobs[$jobId])
-                $results = @()
-                if ($job.State -eq 'Completed') {
-                    try {
-                        $results = @(Receive-Job -Job $job -ErrorAction Stop)
-                    } catch { $results = @() }
-                }
-                try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch { }
-                $resultMap = @{}
-                foreach ($result in $results) {
-                    if ($result -and $result.PSObject.Properties['FullName']) {
-                        $resultMap[[string]$result.FullName] = [double]$result.Duration
-                    }
-                }
-                foreach ($fullName in $expectedPaths) {
-                    $dur = if ($resultMap.ContainsKey($fullName)) { $resultMap[$fullName] } else { -1.0 }
-                    $st.DurationMap[$fullName] = $dur
-                    if ($st.FullNameToRow.ContainsKey($fullName)) {
-                        $row = $st.FullNameToRow[$fullName]
-                        # 行が DataGridView から外されていないか防衛（Rows.Clear / 再構築直後の競合対策）
-                        if ($row -and -not $row.IsNewRow -and $row.DataGridView -eq $dgv) {
-                            try {
-                                $row.Cells['Duration'].Value = MediaNormalizer.Probe\Format-Duration -Seconds $dur
-                            } catch {
-                                # 行 Dispose 等で書き込みに失敗した場合は無視
-                            }
-                        }
-                    }
-                }
-                $completedIds += $jobId
-            }
-        }
-        foreach ($id in $completedIds) { [void]$st.PendingProbeJobs.Remove($id) }
-
-        if ($st.PendingProbeJobs.Count -eq 0) {
-            try { $st.ProbeTimer.Stop() } catch { }
-            try { $st.ProbeTimer.Dispose() } catch { }
-            $st.ProbeTimer = $null
-
-            if ($st.ProbeSummary) {
-                $totalDur = 0.0
-                foreach ($d in $st.DurationMap.Values) { if ($d -gt 0) { $totalDur += $d } }
-                $durDisplay = if ($totalDur -gt 0) { " / 合計再生時間 $(MediaNormalizer.Probe\Format-Duration -Seconds $totalDur)" } else { '' }
-                $s = $st.ProbeSummary
-                $st.Controls.LblSummary.Text = "音声: $($s.AudioCount)件 / 動画: $($s.VideoCount)件 / 全 $($s.Total)件 ($($s.SizeText)$durDisplay)"
-            }
-
-            # プローブ完了で「実行」を再有効化。ただし実行中（CancelRequested を待っている状態）は触らない
-            if ($st.Controls.BtnRun -and -not $st.RunningProcess) {
-                $st.Controls.BtnRun.Enabled = $true
-            }
-        }
-    }.GetNewClosure())
+    $timer.Add_Tick({ Update-PendingProbeJobs -State $stateRef }.GetNewClosure())
     $State.ProbeTimer = $timer
     $timer.Start()
 }
 
 function Update-FileList {
     param([Parameter(Mandatory)][pscustomobject]$State)
+    Initialize-FileGridSelectionState -State $State | Out-Null
     $inputDir = $State.Controls.TxtInput.Text.Trim()
 
     $selectedPaths = @(
@@ -994,24 +1396,42 @@ function Update-FileList {
         return
     }
 
+    $normalizedSelectionPaths = @($selectedPaths | ForEach-Object { [IO.Path]::GetFullPath($_) })
+    $State.InputSelectionPaths = $normalizedSelectionPaths
+    $scopeKey = Get-InputScopeKey -Paths $normalizedSelectionPaths
     $State.ScanValid = $true
     $State.CachedFiles = @($files)
-    Update-FileGrid -State $State
+    Update-FileGrid -State $State -InputScopeKey $scopeKey
 }
 
 function Get-SpeedPercentMapFromGrid {
-    param([Parameter(Mandatory)][pscustomobject]$State)
+    param(
+        [Parameter(Mandatory)][pscustomobject]$State,
+        [AllowNull()][string[]]$EffectiveTargetPaths
+    )
 
     $map = @{}
     $errors = New-Object System.Collections.Generic.List[string]
+    $targetKeys = @{}
+    $hasExplicitTargets = $PSBoundParameters.ContainsKey('EffectiveTargetPaths')
+    foreach ($path in @($EffectiveTargetPaths)) {
+        $key = Get-FileRowStateKey -Path ([string]$path)
+        if ($key) { $targetKeys[$key] = $true }
+    }
     foreach ($row in $State.Controls.Dgv.Rows) {
         $fullName = $row.Cells['FullName'].Value
         if (-not $fullName) { continue }
-        $selected = ($row.Cells['Audio'].Value -eq $true) -or ($row.Cells['Video'].Value -eq $true)
+        $selected = if ($hasExplicitTargets) {
+            $targetKeys.ContainsKey((Get-FileRowStateKey -Path ([string]$fullName)))
+        } else {
+            ($row.Cells['Audio'].Value -eq $true) -or ($row.Cells['Video'].Value -eq $true)
+        }
         if (-not $selected) { continue }
 
+        $defaultSpeed = 100
+        if ($State.Controls.ContainsKey('NumSpeed')) { $defaultSpeed = [int]$State.Controls.NumSpeed.Value }
         try {
-            $map[[string]$fullName] = MediaNormalizer.Core\ConvertTo-SpeedPercent -Value $row.Cells['SpeedPercent'].Value -Default ([int]$State.Controls.NumSpeed.Value)
+            $map[[string]$fullName] = MediaNormalizer.Core\ConvertTo-SpeedPercent -Value $row.Cells['SpeedPercent'].Value -Default $defaultSpeed
         } catch {
             $name = $row.Cells['FileName'].Value
             $errors.Add("${name}: $($_.Exception.Message)")
@@ -1225,6 +1645,42 @@ function Register-InputDropTarget {
     }.GetNewClosure())
 }
 
+function Register-FileGridSelectionEventHandlers {
+    param(
+        [Parameter(Mandatory)][pscustomobject]$State,
+        [Parameter(Mandatory)]$DataGridView
+    )
+
+    $stateRef = $State
+    $dgv = $DataGridView
+    [scriptblock]$saveSelectionFn = ${function:Save-FileGridSelectionStateFromGrid}
+    [scriptblock]$updateSummaryFn = ${function:Update-FileGridSummary}
+    $dgv.Add_CurrentCellDirtyStateChanged({
+        if (-not $dgv.IsCurrentCellDirty -or $null -eq $dgv.CurrentCell) { return }
+        $columnName = [string]$dgv.Columns[$dgv.CurrentCell.ColumnIndex].Name
+        if ($columnName -in @('Audio', 'Video')) {
+            [void]$dgv.CommitEdit([System.Windows.Forms.DataGridViewDataErrorContexts]::Commit)
+        }
+    }.GetNewClosure())
+    $dgv.Add_CellValueChanged({
+        param($sender, $eventArgs)
+        if ($stateRef.FileGridUpdateDepth -gt 0 -or $eventArgs.RowIndex -lt 0) { return }
+        $columnName = [string]$dgv.Columns[$eventArgs.ColumnIndex].Name
+        if ($columnName -notin @('Audio', 'Video', 'SpeedPercent')) { return }
+        & $saveSelectionFn -State $stateRef
+        if ($columnName -in @('Audio', 'Video')) {
+            & $updateSummaryFn -State $stateRef
+        }
+    }.GetNewClosure())
+    $dgv.Add_CellEndEdit({
+        param($sender, $eventArgs)
+        if ($stateRef.FileGridUpdateDepth -gt 0 -or $eventArgs.RowIndex -lt 0) { return }
+        if ([string]$dgv.Columns[$eventArgs.ColumnIndex].Name -eq 'SpeedPercent') {
+            & $saveSelectionFn -State $stateRef
+        }
+    }.GetNewClosure())
+}
+
 function Register-MainFormEventHandlers {
     [CmdletBinding()]
     param(
@@ -1235,9 +1691,11 @@ function Register-MainFormEventHandlers {
     $stateRef = $State
     $c = $State.Controls
     [scriptblock]$getPresetRationaleTextFn = ${function:Get-PresetRationaleText}
+    [scriptblock]$getFileGridSelectionSnapshotFn = ${function:Get-FileGridSelectionSnapshot}
     [scriptblock]$getSpeedPercentMapFromGridFn = ${function:Get-SpeedPercentMapFromGrid}
     [scriptblock]$invokeNormalizeUiFn = ${function:Invoke-NormalizeUi}
     [scriptblock]$resetProgressFn = ${function:Reset-Progress}
+    [scriptblock]$saveFileGridSelectionStateFn = ${function:Save-FileGridSelectionStateFromGrid}
     [scriptblock]$saveSettingsFn = ${function:Save-Settings}
     [scriptblock]$setUiEnabledFn = ${function:Set-UIEnabled}
     [scriptblock]$stopPendingProbeJobsFn = ${function:Stop-PendingProbeJobs}
@@ -1329,22 +1787,23 @@ function Register-MainFormEventHandlers {
             return
         }
 
-        $audioFiles = @()
-        $videoFiles = @()
-        foreach ($row in $cc.Dgv.Rows) {
-            $fullName = $row.Cells['FullName'].Value
-            if (-not $fullName) { continue }
-            $file = $stateRef.FileIndex[$fullName]
-            if (-not $file) { continue }
-            if ($row.Cells['Audio'].Value -eq $true) { $audioFiles += $file }
-            if ($row.Cells['Video'].Value -eq $true) { $videoFiles += $file }
+        & $saveFileGridSelectionStateFn -State $stateRef
+        $snapshot = & $getFileGridSelectionSnapshotFn -State $stateRef
+        if ($snapshot.Errors.Count -gt 0) {
+            & $writeLogFn -State $stateRef -Message '[ERROR] ファイル一覧の状態が不整合です。実行を中止しました。'
+            foreach ($err in $snapshot.Errors) {
+                & $writeLogFn -State $stateRef -Message "        $err"
+            }
+            & $writeLogBufferFn -State $stateRef
+            return
         }
-        if ($audioFiles.Count -eq 0 -and $videoFiles.Count -eq 0) {
+        if ($snapshot.ExecutionCount -eq 0) {
             & $writeLogFn -State $stateRef -Message '[ERROR] チェックされたファイルがありません。音声・動画列にチェックを入れてください。'
             return
         }
 
-        $speedResult = & $getSpeedPercentMapFromGridFn -State $stateRef
+        $speedResult = & $getSpeedPercentMapFromGridFn `
+            -State $stateRef -EffectiveTargetPaths $snapshot.ExecutionPaths
         if ($speedResult.Errors.Count -gt 0) {
             & $writeLogFn -State $stateRef -Message '[ERROR] 速度(%) の指定が不正です。50 から 200 の整数で入力してください。'
             foreach ($err in $speedResult.Errors) {
@@ -1355,36 +1814,21 @@ function Register-MainFormEventHandlers {
         }
 
         $stateRef.ProgressCurrent = 0
-        $analyzeAudioOnly = ($cc.ChkAnalyzeOnly.Checked -and $audioFiles.Count -gt 0)
-        $stateRef.ProgressTotal = if ($analyzeAudioOnly) {
-            $audioFiles.Count
-        } else {
-            $audioFiles.Count + $videoFiles.Count
-        }
-        $stateRef.TotalDurationSec = 0.0
+        $stateRef.ProgressTotal = $snapshot.ExecutionCount
+        $stateRef.TotalDurationSec = [double]$snapshot.SelectedDurationSec
         $stateRef.ProcessedDurationSec = 0.0
-        foreach ($audioFile in $audioFiles) {
-            $duration = $stateRef.DurationMap[$audioFile.FullName]
-            if ($duration -and $duration -gt 0) { $stateRef.TotalDurationSec += $duration }
-        }
-        if (-not $analyzeAudioOnly) {
-            foreach ($videoFile in $videoFiles) {
-                $duration = $stateRef.DurationMap[$videoFile.FullName]
-                if ($duration -and $duration -gt 0) { $stateRef.TotalDurationSec += $duration }
-            }
-        }
         $stateRef.ProcessingStartTime = Get-Date
         & $updateProgressFn -State $stateRef -Current 0 -Total $stateRef.ProgressTotal
 
         & $setUiEnabledFn -State $stateRef -Enabled $false
         try {
-            if ($audioFiles.Count -gt 0) {
+            if ($snapshot.ExecutionAudioFiles.Count -gt 0) {
                 & $invokeNormalizeUiFn -State $stateRef -Mode 'audio' `
-                    -TargetFiles $audioFiles -SpeedPercentByPath $speedResult.Values
+                    -TargetFiles $snapshot.ExecutionAudioFiles -SpeedPercentByPath $speedResult.Values
             }
-            if ($videoFiles.Count -gt 0 -and -not $analyzeAudioOnly) {
+            if ($snapshot.ExecutionVideoFiles.Count -gt 0) {
                 & $invokeNormalizeUiFn -State $stateRef -Mode 'video' `
-                    -TargetFiles $videoFiles -SpeedPercentByPath $speedResult.Values
+                    -TargetFiles $snapshot.ExecutionVideoFiles -SpeedPercentByPath $speedResult.Values
             }
         } finally {
             & $setUiEnabledFn -State $stateRef -Enabled $true
@@ -1458,10 +1902,13 @@ function New-MainForm {
     # private helper ScriptBlocks explicitly so delayed .NET callbacks do not rely
     # on those helpers being exported into the caller's session state.
     [scriptblock]$getPresetRationaleTextFn = ${function:Get-PresetRationaleText}
+    [scriptblock]$initializeFileGridSelectionStateFn = ${function:Initialize-FileGridSelectionState}
     [scriptblock]$setFileGridColumnLayoutFn = ${function:Set-FileGridColumnLayout}
     [scriptblock]$setUiInputSelectionFn = ${function:Set-UiInputSelection}
-    [scriptblock]$updateFileGridFn = ${function:Update-FileGrid}
+    [scriptblock]$updateFileGridModeStateFn = ${function:Update-FileGridModeState}
     [scriptblock]$updateFileListFn = ${function:Update-FileList}
+    [scriptblock]$saveFileGridSelectionStateFn = ${function:Save-FileGridSelectionStateFromGrid}
+    [scriptblock]$updateFileGridSummaryFn = ${function:Update-FileGridSummary}
     [scriptblock]$writeLogFn = ${function:Write-Log}
     [scriptblock]$writeLogBufferFn = ${function:Write-LogBuffer}
 
@@ -1897,6 +2344,7 @@ function New-MainForm {
 
     $form.Controls.Add($dgv)
     $c.Dgv = $dgv
+    Register-FileGridSelectionEventHandlers -State $stateRef -DataGridView $dgv
     $form.Add_DpiChanged({
         param($sender, $eventArgs)
         if ($stateRef.Controls.ContainsKey('Dgv')) {
@@ -2017,6 +2465,8 @@ function New-MainForm {
                 $row.Cells['SpeedPercent'].Value = $value
             }
         }
+        & $saveFileGridSelectionStateFn -State $stateRef
+        & $updateFileGridSummaryFn -State $stateRef
     }.GetNewClosure())
 
     $chkAudio.Add_CheckedChanged({
@@ -2026,7 +2476,7 @@ function New-MainForm {
         } else {
             $ck.ForeColor = [System.Drawing.SystemColors]::ControlText
         }
-        if ($stateRef.ScanValid) { & $updateFileGridFn -State $stateRef }
+        if ($stateRef.ScanValid) { & $updateFileGridModeStateFn -State $stateRef }
     }.GetNewClosure())
 
     $chkVideo.Add_CheckedChanged({
@@ -2036,7 +2486,7 @@ function New-MainForm {
         } else {
             $ck.ForeColor = [System.Drawing.SystemColors]::ControlText
         }
-        if ($stateRef.ScanValid) { & $updateFileGridFn -State $stateRef }
+        if ($stateRef.ScanValid) { & $updateFileGridModeStateFn -State $stateRef }
     }.GetNewClosure())
 
     $chkRecurse.Add_CheckedChanged({
@@ -2052,6 +2502,9 @@ function New-MainForm {
     $txtInput.Add_TextChanged({
         if ($stateRef.ApplyingInputSelection) { return }
         $stateRef.InputSelectionPaths = @()
+        & $initializeFileGridSelectionStateFn -State $stateRef | Out-Null
+        $stateRef.FileRowState = @{}
+        $stateRef.InputScopeKey = $null
         $stateRef.Controls.Dgv.Rows.Clear()
         $stateRef.Controls.LblSummary.Text = '入力パスが変更されました。[確認] を押してください'
         $stateRef.ScanValid = $false
