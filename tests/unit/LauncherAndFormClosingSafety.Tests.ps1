@@ -107,7 +107,8 @@ Describe 'Media Normalizer launcher safety contract' {
             '(?s)# === FormClosing:.*?# === Apply persisted settings ===').Value
 
         $formClosing | Should -Match '\$eventArgs\.Cancel = \$true'
-        $formClosing | Should -Match '\$stateRef\.CancelRequested = \$true'
+        $formClosing | Should -Match '\$stateRef\.OperationState -ne ''Idle'''
+        $formClosing | Should -Match 'requestCancellationFn'
         $formClosing | Should -Not -Match '\.Kill\('
     }
 }

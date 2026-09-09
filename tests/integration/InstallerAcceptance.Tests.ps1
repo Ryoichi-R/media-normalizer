@@ -124,8 +124,8 @@ BeforeAll {
 
 Describe 'Media Normalizer installer isolated acceptance' -Tag 'Integration', 'WindowsOnly' -Skip:(-not $IsWindows) {
     It 'installs the current production payload for both architecture routes' -ForEach @(
-        @{ Architecture = 'AMD64'; Runtime = 'win-x64'; ManagedCount = 222 },
-        @{ Architecture = 'ARM64'; Runtime = 'win-arm64'; ManagedCount = 222 }
+        @{ Architecture = 'AMD64'; Runtime = 'win-x64'; ManagedCount = 223 },
+        @{ Architecture = 'ARM64'; Runtime = 'win-arm64'; ManagedCount = 223 }
     ) {
         $root = Join-Path $TestDrive "production-$Architecture"
         $parent = Join-Path $root 'output'

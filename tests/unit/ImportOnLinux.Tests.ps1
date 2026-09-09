@@ -17,13 +17,15 @@ Describe 'MediaNormalizer.Ui (Linux portable surface)' {
         $script:libRoot = [IO.Path]::Combine($PSScriptRoot, '..', '..', 'lib')
     }
 
-    It 'Core / Probe / Ui を Import-Module しても throw しない' {
+    It 'Core / Probe / Progress / Ui を Import-Module しても throw しない' {
         $coreModule  = [IO.Path]::Combine($script:libRoot, 'MediaNormalizer.Core.psm1')
         $probeModule = [IO.Path]::Combine($script:libRoot, 'MediaNormalizer.Probe.psm1')
+        $progressModule = [IO.Path]::Combine($script:libRoot, 'MediaNormalizer.Progress.psm1')
         $uiModule    = [IO.Path]::Combine($script:libRoot, 'MediaNormalizer.Ui.psm1')
         {
             Import-Module $coreModule  -Force -ErrorAction Stop
             Import-Module $probeModule -Force -ErrorAction Stop
+            Import-Module $progressModule -Force -ErrorAction Stop
             Import-Module $uiModule    -Force -ErrorAction Stop
         } | Should -Not -Throw
     }
@@ -31,9 +33,11 @@ Describe 'MediaNormalizer.Ui (Linux portable surface)' {
     It 'Read-Settings は -SettingsPath / -Defaults 注入で Linux 上でも throw しない' {
         $coreModule  = [IO.Path]::Combine($script:libRoot, 'MediaNormalizer.Core.psm1')
         $probeModule = [IO.Path]::Combine($script:libRoot, 'MediaNormalizer.Probe.psm1')
+        $progressModule = [IO.Path]::Combine($script:libRoot, 'MediaNormalizer.Progress.psm1')
         $uiModule    = [IO.Path]::Combine($script:libRoot, 'MediaNormalizer.Ui.psm1')
         Import-Module $coreModule  -Force
         Import-Module $probeModule -Force
+        Import-Module $progressModule -Force
         Import-Module $uiModule    -Force
 
         $tmpPath = Join-Path ([System.IO.Path]::GetTempPath()) ("mn-portable-" + [guid]::NewGuid().ToString('N') + '.json')

@@ -248,7 +248,8 @@ function Get-MediaInventory {
         [scriptblock]$Logger,
         [scriptblock]$Progress,
         [scriptblock]$PumpEvents,
-        [switch]$CliMode
+        [switch]$CliMode,
+        [System.Threading.CancellationToken]$CancellationToken = [System.Threading.CancellationToken]::None
     )
 
     $arguments = @(
@@ -268,6 +269,7 @@ function Get-MediaInventory {
         -Progress $Progress `
         -PumpEvents $PumpEvents `
         -CliMode:$CliMode `
+        -CancellationToken $CancellationToken `
         -TrackElapsedForEta $false `
         -TrackPhaseProgress $false `
         -SlowWarnSeconds 0
@@ -471,12 +473,14 @@ function Get-MediaLoudnessAnalysis {
         [scriptblock]$Progress,
         [scriptblock]$PumpEvents,
         [switch]$CliMode,
+        [System.Threading.CancellationToken]$CancellationToken = [System.Threading.CancellationToken]::None,
         [double]$CurrentFileDurationSec = -1.0,
         [string]$PhaseLabel = '解析中'
     )
 
     $inventory = Get-MediaInventory -FilePath $FilePath `
-        -State $State -Logger $Logger -Progress $Progress -PumpEvents $PumpEvents -CliMode:$CliMode
+        -State $State -Logger $Logger -Progress $Progress -PumpEvents $PumpEvents -CliMode:$CliMode `
+        -CancellationToken $CancellationToken
     $audioCount = [int]$inventory.StreamCounts.audio
     if ($audioCount -lt 1) {
         throw "音声トラックが見つかりません: $FilePath"
@@ -484,7 +488,7 @@ function Get-MediaLoudnessAnalysis {
 
     $streams = [Collections.Generic.List[object]]::new()
     for ($audioIndex = 0; $audioIndex -lt $audioCount; $audioIndex++) {
-        if ($State -and $State.CancelRequested) {
+        if (Test-MediaNormalizerCancellationRequested -State $State -CancellationToken $CancellationToken) {
             throw "キャンセルされました: $FilePath (audio=$audioIndex)"
         }
 
@@ -513,7 +517,8 @@ function Get-MediaLoudnessAnalysis {
             -TrackPhaseProgress $true `
             -PhaseProgressBasePercent ([double]$audioIndex / $audioCount * 100.0) `
             -PhaseProgressScale (1.0 / $audioCount) `
-            -WriteProgressFile
+            -WriteProgressFile `
+            -CancellationToken $CancellationToken
         if ($result.ExitCode -ne 0) {
             throw "ffmpeg によるラウドネス解析に失敗しました: $FilePath (audio=$audioIndex)"
         }
@@ -1033,6 +1038,16 @@ function Get-MediaNormalizerLogFileLength {
     try { return (Get-Item -LiteralPath $Path).Length } catch { return 0L }
 }
 
+function Test-MediaNormalizerCancellationRequested {
+    param(
+        [pscustomobject]$State,
+        [System.Threading.CancellationToken]$CancellationToken = [System.Threading.CancellationToken]::None
+    )
+
+    return (($State -and $State.CancelRequested) -or
+        ($CancellationToken -and $CancellationToken.IsCancellationRequested))
+}
+
 function Wait-MediaNormalizerProcessWithProgress {
     [CmdletBinding()]
     param(
@@ -1060,7 +1075,8 @@ function Wait-MediaNormalizerProcessWithProgress {
         [double]$HeartbeatIntervalSeconds = 5.0,
         [double]$UiUpdateIntervalSeconds = 0.25,
         [int]$SleepMilliseconds = 100,
-        [scriptblock]$GetNow = { Get-Date }
+        [scriptblock]$GetNow = { Get-Date },
+        [System.Threading.CancellationToken]$CancellationToken = [System.Threading.CancellationToken]::None
     )
 
     $startAt = & $GetNow
@@ -1075,7 +1091,8 @@ function Wait-MediaNormalizerProcessWithProgress {
         if ($PumpEvents -and -not $CliMode) { & $PumpEvents }
         Start-Sleep -Milliseconds $SleepMilliseconds
 
-        if ($State.CancelRequested -and -not $cancelSignalled -and -not $ProcessLike.HasExited) {
+        if ((Test-MediaNormalizerCancellationRequested -State $State -CancellationToken $CancellationToken) -and
+            -not $cancelSignalled -and -not $ProcessLike.HasExited) {
             if ($CancelAction) { & $CancelAction }
             $cancelSignalled = $true
         }
@@ -1159,7 +1176,8 @@ function Invoke-MediaNormalizerProcess {
         [double]$UiUpdateIntervalSeconds = 0.25,
         [switch]$WriteProgressFile,
         [int]$SleepMilliseconds = 100,
-        [scriptblock]$GetNow = { Get-Date }
+        [scriptblock]$GetNow = { Get-Date },
+        [System.Threading.CancellationToken]$CancellationToken = [System.Threading.CancellationToken]::None
     )
 
     if (-not $State) { $State = New-MediaNormalizerState }
@@ -1214,6 +1232,7 @@ function Invoke-MediaNormalizerProcess {
             -LongRunningMessage $LongRunningMessage `
             -SlowWarnSeconds $SlowWarnSeconds `
             -CancelAction $cancelAction `
+            -CancellationToken $CancellationToken `
             -TrackElapsedForEta $TrackElapsedForEta `
             -TrackPhaseProgress $TrackPhaseProgress `
             -PhaseProgressBasePercent $PhaseProgressBasePercent `
@@ -1482,7 +1501,8 @@ function Invoke-Normalize {
         [string]$ReportPath,
         [ValidateSet('audio', 'video', 'both')][string]$ReportMode,
         [scriptblock]$Analyzer,
-        [switch]$CliMode
+        [switch]$CliMode,
+        [System.Threading.CancellationToken]$CancellationToken = [System.Threading.CancellationToken]::None
     )
 
     if (-not $Logger) { $Logger = { param($m) Write-Host $m } }
@@ -1597,7 +1617,7 @@ function Invoke-Normalize {
     $reportSucceeded = $true
     $reportError = $null
     foreach ($f in $files) {
-        if ($State.CancelRequested) {
+        if (Test-MediaNormalizerCancellationRequested -State $State -CancellationToken $CancellationToken) {
             & $Logger "[CANCEL] $($f.Name) -- ユーザー要求によりスキップ"
             $cancelled++
             continue
@@ -1623,7 +1643,8 @@ function Invoke-Normalize {
             $inputInventory = $null
             if ($Mode -eq 'video' -and $currentSpeedPercent -ne 100) {
                 $inputInventory = Get-MediaInventory -FilePath $f.FullName `
-                    -State $State -Logger $Logger -Progress $Progress -PumpEvents $PumpEvents -CliMode:$CliMode
+                    -State $State -Logger $Logger -Progress $Progress -PumpEvents $PumpEvents -CliMode:$CliMode `
+                    -CancellationToken $CancellationToken
                 $speedSafety = Test-VideoSpeedChangeSafety -Inventory $inputInventory
                 if (-not $speedSafety.IsSafe) {
                     throw (
@@ -1644,6 +1665,7 @@ function Invoke-Normalize {
             } else {
                 Get-MediaLoudnessAnalysis -FilePath $f.FullName -Target $Target -TruePeak $TruePeak `
                     -State $State -Logger $Logger -Progress $Progress -PumpEvents $PumpEvents -CliMode:$CliMode `
+                    -CancellationToken $CancellationToken `
                     -CurrentFileDurationSec $currentDur -PhaseLabel '解析中'
             }
             $record.before = $beforeAnalysis
@@ -1700,7 +1722,8 @@ function Invoke-Normalize {
                     $workingOutPath = New-SafeOutputPath -FinalPath $expectedOutPath
                     if (-not $inputInventory) {
                         $inputInventory = Get-MediaInventory -FilePath $f.FullName `
-                            -State $State -Logger $Logger -Progress $Progress -PumpEvents $PumpEvents -CliMode:$CliMode
+                            -State $State -Logger $Logger -Progress $Progress -PumpEvents $PumpEvents -CliMode:$CliMode `
+                            -CancellationToken $CancellationToken
                     }
                     if ($Mode -eq 'audio' -and
                         $inputInventory.StreamCounts.audio -gt 1) {
@@ -1767,6 +1790,7 @@ function Invoke-Normalize {
                                 -Progress $Progress `
                                 -PumpEvents $PumpEvents `
                                 -CliMode:$CliMode `
+                                -CancellationToken $CancellationToken `
                                 -CurrentFileDurationSec $currentDur `
                                 -LongRunningMessage '速度変更前処理が長時間実行中です。' `
                                 -TrackElapsedForEta $true `
@@ -1801,6 +1825,7 @@ function Invoke-Normalize {
                             -Progress $Progress `
                             -PumpEvents $PumpEvents `
                             -CliMode:$CliMode `
+                            -CancellationToken $CancellationToken `
                             -CurrentFileDurationSec $currentDur `
                             -LongRunningMessage '正規化処理が長時間実行中です。' `
                             -TrackElapsedForEta $true `
@@ -1825,7 +1850,8 @@ function Invoke-Normalize {
                     }
 
                     $outputInventory = Get-MediaInventory -FilePath $workingOutPath `
-                        -State $State -Logger $Logger -Progress $Progress -PumpEvents $PumpEvents -CliMode:$CliMode
+                        -State $State -Logger $Logger -Progress $Progress -PumpEvents $PumpEvents -CliMode:$CliMode `
+                        -CancellationToken $CancellationToken
                     $integrity = Compare-MediaInventory `
                         -InputInventory $inputInventory `
                         -OutputInventory $outputInventory `
@@ -1847,6 +1873,7 @@ function Invoke-Normalize {
                             -Target $Target `
                             -TruePeak $TruePeak `
                             -State $State -Logger $Logger -Progress $Progress -PumpEvents $PumpEvents -CliMode:$CliMode `
+                            -CancellationToken $CancellationToken `
                             -CurrentFileDurationSec $currentDur -PhaseLabel '検証解析中'
                     }
                     Complete-SafeOutput `
@@ -1865,7 +1892,7 @@ function Invoke-Normalize {
             }
         } catch {
             $record.error = $_.Exception.Message
-            if ($State.CancelRequested) {
+            if (Test-MediaNormalizerCancellationRequested -State $State -CancellationToken $CancellationToken) {
                 $record.action = 'cancelled'
                 & $Logger "[CANCEL] $($f.Name) -- 実行中にキャンセルされました"
                 $cancelled++

@@ -1,9 +1,17 @@
 [CmdletBinding()]
 param(
+    [Parameter(ParameterSetName = 'Legacy')]
+    [Parameter(ParameterSetName = 'Candidate')]
     [ValidateSet('win-x64', 'win-arm64')]
     [string[]]$Runtime = @('win-x64', 'win-arm64'),
+    [Parameter(ParameterSetName = 'Legacy')]
+    [Parameter(ParameterSetName = 'Candidate')]
     [string]$ArtifactsRoot,
-    [string]$RequiredFilesManifest
+    [Parameter(ParameterSetName = 'Legacy')]
+    [Parameter(ParameterSetName = 'Candidate')]
+    [string]$RequiredFilesManifest,
+    [Parameter(ParameterSetName = 'Candidate', Mandatory)]
+    [string]$BuildInputSnapshotPath
 )
 
 Set-StrictMode -Version Latest
@@ -46,6 +54,55 @@ function Test-SafeZipEntryName {
         $normalized -notmatch '(^|[\\/])\.\.?([\\/]|$)')
 }
 
+function Test-SafeRelativePath {
+    param([Parameter(Mandatory)][string]$Path)
+    return (-not [string]::IsNullOrWhiteSpace($Path) -and
+        -not [IO.Path]::IsPathRooted($Path) -and
+        -not $Path.Contains(':') -and
+        $Path -notmatch '(^|[\\/])\.\.?([\\/]|$)')
+}
+
+function Assert-NoAbsolutePathValues {
+    param($Value, [string]$Context = '$')
+    if ($Value -is [string]) {
+        if ([IO.Path]::IsPathRooted($Value) -or $Value -match '^[A-Za-z]:[\\/]' -or $Value -match '^\\\\') {
+            throw "絶対パスを含むprovenance値です: $Context"
+        }
+        return
+    }
+    if ($Value -is [System.Collections.IDictionary]) {
+        foreach ($key in $Value.Keys) { Assert-NoAbsolutePathValues -Value $Value[$key] -Context "$Context.$key" }
+        return
+    }
+    if ($Value -is [System.Collections.IEnumerable] -and $Value -isnot [byte[]]) {
+        $index = 0
+        foreach ($item in $Value) { Assert-NoAbsolutePathValues -Value $item -Context "$Context[$index]"; $index++ }
+        return
+    }
+    if ($Value -is [pscustomobject]) {
+        foreach ($property in $Value.PSObject.Properties) {
+            Assert-NoAbsolutePathValues -Value $property.Value -Context "$Context.$($property.Name)"
+        }
+    }
+}
+
+function Get-FileDigestMap {
+    param([Parameter(Mandatory)][string]$Root)
+    $map = @{}
+    foreach ($file in @(Get-ChildItem -LiteralPath $Root -File -Recurse -Force)) {
+        $relative = [IO.Path]::GetRelativePath($Root, $file.FullName).Replace('\', '/')
+        if (-not (Test-SafeRelativePath -Path $relative)) { throw "安全でない成果物相対パスです: $relative" }
+        $key = $relative.ToLowerInvariant()
+        if ($map.ContainsKey($key)) { throw "重複した成果物相対パスです: $relative" }
+        $map[$key] = [pscustomobject]@{
+            Path = $relative
+            Size = [long]$file.Length
+            Sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    }
+    return $map
+}
+
 $failures = [Collections.Generic.List[string]]::new()
 $receipts = [Collections.Generic.List[object]]::new()
 foreach ($rid in $Runtime) {
@@ -82,7 +139,7 @@ foreach ($rid in $Runtime) {
                 if (-not (Test-SafeZipEntryName -Name $entry.FullName)) {
                     throw "危険なZIPエントリです: $($entry.FullName)"
                 }
-                $key = $entry.FullName.Replace('/', '\').ToLowerInvariant()
+                $key = $entry.FullName.Replace('\', '/').ToLowerInvariant()
                 if ($entryMap.ContainsKey($key)) {
                     throw "重複したZIPエントリです: $($entry.FullName)"
                 }
@@ -97,7 +154,7 @@ foreach ($rid in $Runtime) {
             }
 
             foreach ($relative in $required) {
-                $key = $relative.Replace('/', '\').ToLowerInvariant()
+                $key = $relative.Replace('\', '/').ToLowerInvariant()
                 $filePath = Join-Path $package $relative
                 if (-not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
                     throw "展開済み成果物の必須ファイルがありません: $relative"
@@ -112,6 +169,86 @@ foreach ($rid in $Runtime) {
             }
         } finally {
             $archive.Dispose()
+        }
+
+        if ($PSBoundParameters.ContainsKey('BuildInputSnapshotPath')) {
+            if (-not (Test-Path -LiteralPath $BuildInputSnapshotPath -PathType Leaf)) {
+                throw "build input snapshotがありません: $BuildInputSnapshotPath"
+            }
+            $snapshot = Get-Content -LiteralPath $BuildInputSnapshotPath -Raw | ConvertFrom-Json
+            Assert-NoAbsolutePathValues -Value $snapshot -Context 'snapshot'
+            if ([int]$snapshot.SchemaVersion -ne 1 -or
+                [string]$snapshot.Runtime -ne $rid -or
+                [string]$snapshot.OutputName -ne $name -or
+                [string]::IsNullOrWhiteSpace([string]$snapshot.BuildId)) {
+                throw "build input snapshotの識別情報が一致しません: $rid"
+            }
+            $snapshotEntries = @($snapshot.Entries)
+            $expectedKeys = @($required | ForEach-Object { ([string]$_).Replace('\', '/').ToLowerInvariant() })
+            $snapshotMap = @{}
+            foreach ($entry in $snapshotEntries) {
+                $relative = [string]$entry.Path
+                if (-not (Test-SafeRelativePath -Path $relative)) { throw "snapshotの相対パスが不正です: $relative" }
+                $key = $relative.Replace('\', '/').ToLowerInvariant()
+                if ($snapshotMap.ContainsKey($key)) { throw "snapshotに重複entryがあります: $relative" }
+                $snapshotMap[$key] = [pscustomobject]@{
+                    Path = $relative.Replace('\', '/')
+                    Size = [long]$entry.Size
+                    Sha256 = ([string]$entry.Sha256).ToLowerInvariant()
+                }
+            }
+            if ((@($snapshotMap.Keys | Sort-Object) -join "`n") -ne
+                (@($expectedKeys | Sort-Object) -join "`n")) {
+                throw 'snapshotのentry集合がrequired-files manifestと一致しません。'
+            }
+            $snapshotManifest = foreach ($key in ($snapshotMap.Keys | Sort-Object)) {
+                $entry = $snapshotMap[$key]
+                "$($entry.Path)`t$($entry.Size)`t$($entry.Sha256)"
+            }
+            $snapshotDigest = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+                    [Text.Encoding]::UTF8.GetBytes(($snapshotManifest -join "`n")))).ToLowerInvariant()
+            if ($snapshotDigest -ne ([string]$snapshot.SnapshotDigest).ToLowerInvariant()) {
+                throw 'snapshot digestが一致しません。'
+            }
+
+            $provenancePath = Join-Path $package 'build-provenance.json'
+            if (-not (Test-Path -LiteralPath $provenancePath -PathType Leaf)) {
+                throw "build provenanceがありません: $provenancePath"
+            }
+            $provenance = Get-Content -LiteralPath $provenancePath -Raw | ConvertFrom-Json
+            Assert-NoAbsolutePathValues -Value $provenance -Context 'provenance'
+            if ([int]$provenance.SchemaVersion -ne 1 -or
+                [string]$provenance.Runtime -ne $rid -or
+                [string]$provenance.OutputName -ne $name -or
+                [string]$provenance.BuildId -ne [string]$snapshot.BuildId -or
+                [string]$provenance.SnapshotDigest -ne [string]$snapshot.SnapshotDigest) {
+                throw 'build provenanceとsnapshotの識別情報が一致しません。'
+            }
+            $packageMap = Get-FileDigestMap -Root $package
+            if ($packageMap.Count -ne $entryMap.Count) {
+                throw "ZIPと展開済み成果物のファイル件数が一致しません: $($entryMap.Count) != $($packageMap.Count)"
+            }
+            foreach ($key in $entryMap.Keys) {
+                if (-not $packageMap.ContainsKey($key)) {
+                    throw "ZIPに対する展開済み成果物のfileがありません: $key"
+                }
+                if ($entryMap[$key].Sha256 -ne $packageMap[$key].Sha256 -or
+                    [long]$entryMap[$key].Entry.Length -ne [long]$packageMap[$key].Size) {
+                    throw "ZIPと展開済み成果物の全file照合に失敗しました: $key"
+                }
+            }
+            foreach ($key in $snapshotMap.Keys) {
+                $relative = $snapshotMap[$key].Path
+                $filePath = Join-Path $package ($relative.Replace('/', '\'))
+                if (-not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+                    throw "candidateのrequired fileがありません: $relative"
+                }
+                $file = Get-Item -LiteralPath $filePath -Force
+                $hash = (Get-FileHash -LiteralPath $filePath -Algorithm SHA256).Hash.ToLowerInvariant()
+                if ([long]$file.Length -ne [long]$snapshotMap[$key].Size -or $hash -ne $snapshotMap[$key].Sha256) {
+                    throw "candidateのrequired fileがsnapshotと一致しません: $relative"
+                }
+            }
         }
 
         $dependencyManifestPath = Join-Path $package 'runtime\dependency-manifest.json'

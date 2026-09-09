@@ -379,6 +379,43 @@ function Publish-Launcher {
     Remove-Item -LiteralPath $publishRoot -Recurse -Force
 }
 
+function Get-RequiredInputSnapshot {
+    param(
+        [Parameter(Mandatory)][string]$PackageRoot,
+        [Parameter(Mandatory)][string[]]$RequiredRelativePaths
+    )
+
+    $packageFull = Assert-PathWithinRoot -Path $PackageRoot -Root $PackageRoot
+    $entries = foreach ($relative in @($RequiredRelativePaths | Sort-Object)) {
+        $safeRelative = [string]$relative
+        if ([IO.Path]::IsPathRooted($safeRelative) -or $safeRelative -match '(^|[\\/])\.\.?([\\/]|$)' -or $safeRelative -match ':') {
+            throw "Required file path must be relative: $safeRelative"
+        }
+        $filePath = Assert-PathWithinRoot -Path (Join-Path $packageFull $safeRelative) -Root $packageFull
+        if (-not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+            throw "Required input snapshot file is missing: $safeRelative"
+        }
+        $file = Get-Item -LiteralPath $filePath -Force
+        [pscustomobject]@{
+            Path = $safeRelative.Replace('\', '/')
+            Size = [long]$file.Length
+            Sha256 = (Get-FileHash -LiteralPath $filePath -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    }
+    $manifest = ($entries | ForEach-Object { "$($_.Path)`t$($_.Size)`t$($_.Sha256)" }) -join "`n"
+    [pscustomobject]@{
+        Entries = @($entries)
+        SnapshotDigest = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData(
+                [Text.Encoding]::UTF8.GetBytes($manifest))).ToLowerInvariant()
+    }
+}
+
+function Write-Utf8JsonFile {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)]$InputObject)
+    $json = $InputObject | ConvertTo-Json -Depth 10
+    [IO.File]::WriteAllText($Path, $json + "`r`n", [Text.UTF8Encoding]::new($false))
+}
+
 function Select-OutputRootFolder {
     param([Parameter(Mandatory)][string]$InitialDirectory)
 
@@ -685,6 +722,12 @@ $backupDirectory = Assert-ManagedDirectory `
     -Path (Join-Path $backupRoot $backupName) `
     -Root $backupRoot `
     -ExpectedLeaf $backupName
+$backupZip = Assert-PathWithinRoot `
+    -Path (Join-Path $backupRoot "$backupName.zip") `
+    -Root $backupRoot
+$backupChecksum = Assert-PathWithinRoot `
+    -Path (Join-Path $backupRoot "$backupName.zip.sha256") `
+    -Root $backupRoot
 
 $updateMutex = [Threading.Mutex]::new($false, "Local\MediaNormalizer-Rebuild-$mutexHash")
 $updateLockTaken = $false
@@ -696,6 +739,8 @@ $outputZip = Assert-PathWithinRoot `
 $outputChecksum = Assert-PathWithinRoot `
     -Path (Join-Path $managedRoot "$outputName.zip.sha256") `
     -Root $managedRoot
+$outputZipExisted = Test-Path -LiteralPath $outputZip -PathType Leaf
+$outputChecksumExisted = Test-Path -LiteralPath $outputChecksum -PathType Leaf
 $stagingZip = Assert-PathWithinRoot `
     -Path (Join-Path $stagingManagedRoot "$stagingName.zip") `
     -Root $stagingManagedRoot
@@ -850,6 +895,33 @@ try {
         }
     }
 
+    $buildId = [guid]::NewGuid().ToString('N')
+    $requiredSnapshot = Get-RequiredInputSnapshot `
+        -PackageRoot $stagingDirectory `
+        -RequiredRelativePaths @($requiredFilesDefinition.RequiredRelativePaths)
+    $provenancePath = Assert-PathWithinRoot `
+        -Path (Join-Path $stagingDirectory 'build-provenance.json') `
+        -Root $stagingDirectory
+    Write-Utf8JsonFile -Path $provenancePath -InputObject ([pscustomobject]@{
+            SchemaVersion = 1
+            Runtime = $Runtime
+            BuildId = $buildId
+            OutputName = $outputName
+            CreatedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+            SnapshotDigest = $requiredSnapshot.SnapshotDigest
+        })
+    $stagingSnapshotPath = Assert-PathWithinRoot `
+        -Path (Join-Path $stagingManagedRoot "$stagingName.build-input-snapshot.json") `
+        -Root $stagingManagedRoot
+    Write-Utf8JsonFile -Path $stagingSnapshotPath -InputObject ([pscustomobject]@{
+            SchemaVersion = 1
+            Runtime = $Runtime
+            BuildId = $buildId
+            OutputName = $outputName
+            Entries = $requiredSnapshot.Entries
+            SnapshotDigest = $requiredSnapshot.SnapshotDigest
+        })
+
     $stagingDigest = Get-DirectoryDigest `
         -Path $stagingDirectory `
         -AllowedRoot $stagingManagedRoot
@@ -871,6 +943,18 @@ try {
         if ((Get-DirectoryDigest -Path $backupDirectory -AllowedRoot $backupRoot) -ne
             (Get-DirectoryDigest -Path $outputDirectory -AllowedRoot $managedRoot)) {
             throw 'Backup verification failed before updating the current build.'
+        }
+        if ($outputZipExisted) {
+            Copy-Item -LiteralPath $outputZip -Destination $backupZip -Force
+        }
+        elseif (Test-Path -LiteralPath $backupZip) {
+            Remove-Item -LiteralPath $backupZip -Force
+        }
+        if ($outputChecksumExisted) {
+            Copy-Item -LiteralPath $outputChecksum -Destination $backupChecksum -Force
+        }
+        elseif (Test-Path -LiteralPath $backupChecksum) {
+            Remove-Item -LiteralPath $backupChecksum -Force
         }
         $backupPrepared = $true
     }
@@ -895,7 +979,13 @@ try {
         & (Join-Path $PSScriptRoot 'test-artifact-integrity.ps1') `
             -Runtime $Runtime `
             -ArtifactsRoot $managedRoot `
-            -RequiredFilesManifest $requiredFilesDefinitionPath
+            -RequiredFilesManifest $requiredFilesDefinitionPath `
+            -BuildInputSnapshotPath $stagingSnapshotPath
+
+        $promotedSnapshotPath = Assert-PathWithinRoot `
+            -Path (Join-Path $managedRoot "$outputName.build-input-snapshot.json") `
+            -Root $managedRoot
+        Copy-Item -LiteralPath $stagingSnapshotPath -Destination $promotedSnapshotPath -Force
     }
     catch {
         if ($backupPrepared) {
@@ -904,6 +994,18 @@ try {
                 -Destination $outputDirectory `
                 -SourceRoot $backupRoot `
                 -DestinationRoot $managedRoot
+            if ($outputZipExisted) {
+                Copy-Item -LiteralPath $backupZip -Destination $outputZip -Force
+            }
+            elseif (Test-Path -LiteralPath $outputZip) {
+                Remove-Item -LiteralPath $outputZip -Force
+            }
+            if ($outputChecksumExisted) {
+                Copy-Item -LiteralPath $backupChecksum -Destination $outputChecksum -Force
+            }
+            elseif (Test-Path -LiteralPath $outputChecksum) {
+                Remove-Item -LiteralPath $outputChecksum -Force
+            }
         }
         elseif (-not $outputExisted -and (Test-Path -LiteralPath $outputDirectory)) {
             $safePartialOutput = Assert-ManagedDirectory `
@@ -911,6 +1013,8 @@ try {
                 -Root $managedRoot `
                 -ExpectedLeaf $outputName
             Remove-Item -LiteralPath $safePartialOutput -Recurse -Force
+            if (Test-Path -LiteralPath $outputZip) { Remove-Item -LiteralPath $outputZip -Force }
+            if (Test-Path -LiteralPath $outputChecksum) { Remove-Item -LiteralPath $outputChecksum -Force }
         }
         throw
     }
@@ -919,6 +1023,8 @@ try {
     Write-Host "Launcher: $(Join-Path $outputDirectory 'media-normalizer.bat')" -ForegroundColor Green
     Write-Host "ZIP: $outputZip" -ForegroundColor Green
     Write-Host "SHA-256: $($stagingZipHash.ToLowerInvariant())" -ForegroundColor Green
+    Write-Host "Build ID: $buildId" -ForegroundColor Green
+    Write-Host "Build input snapshot: $promotedSnapshotPath" -ForegroundColor Green
     if ($backupPrepared) {
         Write-Host "Previous build retained for rollback: $backupDirectory" -ForegroundColor Yellow
     }

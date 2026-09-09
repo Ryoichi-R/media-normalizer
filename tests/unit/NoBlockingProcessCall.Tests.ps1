@@ -181,6 +181,21 @@ Describe 'lib 内の外部プロセス直接待機 (NoBlockingProcessCall)' {
         $unexpectedWarnings.Count | Should -Be 0
     }
 
+    It 'UI event handlerから正規化本体を同期呼出ししない' {
+        $path = Join-Path $script:libRoot 'MediaNormalizer.Ui.psm1'
+        $tokens = $null
+        $parseErrors = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+            $path, [ref]$tokens, [ref]$parseErrors)
+        $handler = $ast.FindAll({ param($node)
+                $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq 'Register-MainFormEventHandlers'
+            }, $true) | Select-Object -First 1
+        $handler | Should -Not -BeNullOrEmpty
+        $handler.Extent.Text | Should -Not -Match '\bInvoke-Normalize(Ui)?\b'
+        $handler.Extent.Text | Should -Match 'Start-UiOperation'
+    }
+
     It '意図的に許可対象外の ffprobe 直接呼び出しを混入させると検出する(検査自体の有効性確認)' {
         $tempFile = [IO.Path]::Combine([IO.Path]::GetTempPath(), "nbc-test-$([guid]::NewGuid().ToString('N')).psm1")
         try {

@@ -527,6 +527,21 @@ function Initialize-UiState {
     Add-Member -InputObject $State -NotePropertyName 'InputScopeKey' -NotePropertyValue $null -Force
     Add-Member -InputObject $State -NotePropertyName 'FileGridUpdateDepth' -NotePropertyValue 0 -Force
     Add-Member -InputObject $State -NotePropertyName 'FileGridModeRefreshPending' -NotePropertyValue $false -Force
+    Add-Member -InputObject $State -NotePropertyName 'OperationId' -NotePropertyValue $null -Force
+    Add-Member -InputObject $State -NotePropertyName 'LastOperationId' -NotePropertyValue $null -Force
+    Add-Member -InputObject $State -NotePropertyName 'OperationState' -NotePropertyValue 'Idle' -Force
+    Add-Member -InputObject $State -NotePropertyName 'OperationStartedAt' -NotePropertyValue $null -Force
+    Add-Member -InputObject $State -NotePropertyName 'WorkerHandle' -NotePropertyValue $null -Force
+    Add-Member -InputObject $State -NotePropertyName 'ActiveChildPid' -NotePropertyValue $null -Force
+    Add-Member -InputObject $State -NotePropertyName 'CurrentPhase' -NotePropertyValue $null -Force
+    Add-Member -InputObject $State -NotePropertyName 'LastHeartbeatAt' -NotePropertyValue $null -Force
+    Add-Member -InputObject $State -NotePropertyName 'LastOutputGrowthAt' -NotePropertyValue $null -Force
+    Add-Member -InputObject $State -NotePropertyName 'CompletionHandled' -NotePropertyValue $false -Force
+    Add-Member -InputObject $State -NotePropertyName 'FinalizationStarted' -NotePropertyValue $false -Force
+    Add-Member -InputObject $State -NotePropertyName 'LastCompletionReason' -NotePropertyValue 'None' -Force
+    Add-Member -InputObject $State -NotePropertyName 'OperationCancellation' -NotePropertyValue $null -Force
+    Add-Member -InputObject $State -NotePropertyName 'OperationEvents' -NotePropertyValue $null -Force
+    Add-Member -InputObject $State -NotePropertyName 'OrphanTimeoutSeconds' -NotePropertyValue 15 -Force
 
     # HasThreadJob は Core State 既存。Initialize-ThreadJob の結果を代入する。
     $State.HasThreadJob = Initialize-ThreadJob -State $State
@@ -588,7 +603,13 @@ function Start-LogTimer {
     $timer.Interval = 100
     $stateRef = $State
     [scriptblock]$writeLogBufferFn = ${function:Write-LogBuffer}
-    $timer.Add_Tick({ & $writeLogBufferFn -State $stateRef }.GetNewClosure())
+    [scriptblock]$receiveOperationEventsFn = ${function:Receive-UiOperationEvents}
+    $timer.Add_Tick({
+        if ($stateRef.OperationState -ne 'Idle') {
+            & $receiveOperationEventsFn -State $stateRef
+        }
+        & $writeLogBufferFn -State $stateRef
+    }.GetNewClosure())
     $State.LogTimer = $timer
     $timer.Start()
 }
@@ -663,7 +684,6 @@ function Update-Progress {
     }
 
     $lbl.Text = $text
-    [System.Windows.Forms.Application]::DoEvents()
 }
 
 function Reset-Progress {
@@ -674,7 +694,19 @@ function Reset-Progress {
     $State.TotalDurationSec = 0.0
     $State.ProcessingStartTime = $null
     $State.CurrentFileElapsedSec = 0.0
-    [System.Windows.Forms.Application]::DoEvents()
+}
+
+function Get-BuildProvenance {
+    $packageRoot = Split-Path -Parent $PSScriptRoot
+    $path = Join-Path $packageRoot 'build-provenance.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    try {
+        $provenance = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -ErrorAction Stop
+        if ([int]$provenance.SchemaVersion -ne 1 -or
+            [string]::IsNullOrWhiteSpace([string]$provenance.Runtime) -or
+            [string]::IsNullOrWhiteSpace([string]$provenance.BuildId)) { return $null }
+        return $provenance
+    } catch { return $null }
 }
 
 # === ファイル一覧 ===
@@ -709,6 +741,323 @@ function Initialize-FileGridSelectionState {
         }
     }
     return $State
+}
+
+function Set-UiOperationState {
+    param(
+        [Parameter(Mandatory)][pscustomobject]$State,
+        [Parameter(Mandatory)][ValidateSet('Idle', 'Starting', 'Running', 'Cancelling', 'Finalizing')][string]$OperationState
+    )
+
+    $previous = if ($State.PSObject.Properties['OperationState']) { [string]$State.OperationState } else { 'Idle' }
+    $allowed = @{
+        Idle       = @('Starting')
+        Starting   = @('Running', 'Finalizing')
+        Running    = @('Cancelling', 'Finalizing')
+        Cancelling = @('Finalizing')
+        Finalizing = @('Idle')
+    }
+    if ($previous -ne $OperationState -and
+        (-not $allowed.ContainsKey($previous) -or -not $allowed[$previous].Contains($OperationState))) {
+        throw "不正なoperation state遷移です: $previous -> $OperationState"
+    }
+    $State.OperationState = $OperationState
+    if ($State.Controls -and $State.Controls.ContainsKey('LblOperationStatus')) {
+        $State.Controls.LblOperationStatus.Text = switch ($OperationState) {
+            'Idle' { '待機中' }
+            'Starting' { '開始準備中...' }
+            'Running' { '実行中（対象を固定しています。キャンセル完了後に変更できます）' }
+            'Cancelling' { 'キャンセル処理中...' }
+            'Finalizing' { '結果を確定中...' }
+        }
+    }
+    if ($State.Controls -and $State.Controls.ContainsKey('BtnRun')) {
+        Set-UIEnabled -State $State -Enabled:($OperationState -eq 'Idle')
+    }
+}
+
+function Write-UiOperationLog {
+    param([Parameter(Mandatory)][pscustomobject]$State, [Parameter(Mandatory)][string]$Message)
+    $operationId = if ($State.PSObject.Properties['OperationId'] -and $State.OperationId) {
+        [string]$State.OperationId
+    } else { '-' }
+    Write-Log -State $State -Message ('[{0}] [op:{1}] {2}' -f (Get-Date -Format 'o'), $operationId, $Message)
+}
+
+function Dispose-UiWorker {
+    param([Parameter(Mandatory)][pscustomobject]$Worker)
+    if ($Worker.PowerShell) {
+        try { $Worker.PowerShell.Dispose() } catch { }
+    }
+    if ($Worker.Runspace) {
+        try { $Worker.Runspace.Close() } catch { }
+        try { $Worker.Runspace.Dispose() } catch { }
+    }
+}
+
+function Test-UiActiveChildProcess {
+    param([Parameter(Mandatory)][pscustomobject]$State)
+    if (-not $State.PSObject.Properties['ActiveChildPid'] -or
+        -not $State.ActiveChildPid) {
+        return $false
+    }
+    try {
+        $process = Get-Process -Id ([int]$State.ActiveChildPid) -ErrorAction Stop
+        return -not $process.HasExited
+    } catch {
+        return $false
+    }
+}
+
+function Complete-UiOperation {
+    param(
+        [Parameter(Mandatory)][pscustomobject]$State,
+        [Parameter(Mandatory)][string]$OperationId,
+        [ValidateSet('Succeeded', 'Failed', 'Cancelled', 'Orphaned')][string]$Reason = 'Failed',
+        [string]$Detail
+    )
+
+    if ([string]$State.OperationId -ne $OperationId -or
+        [bool]$State.CompletionHandled -or [bool]$State.FinalizationStarted) {
+        return $false
+    }
+    $State.FinalizationStarted = $true
+    try { Set-UiOperationState -State $State -OperationState 'Finalizing' } catch { $State.OperationState = 'Finalizing' }
+    $State.LastCompletionReason = $Reason
+    try { if ($Detail) { Write-UiOperationLog -State $State -Message $Detail } } catch { }
+    try { Write-UiOperationLog -State $State -Message "終了reason=$Reason" } catch { }
+    try { Write-LogBuffer -State $State } catch { }
+    try {
+        if ($State.WorkerHandle) { Dispose-UiWorker -Worker $State.WorkerHandle }
+    } catch { }
+    $State.WorkerHandle = $null
+    if ($State.OperationCancellation) {
+        try { $State.OperationCancellation.Dispose() } catch { }
+    }
+    $State.OperationCancellation = $null
+    $State.OperationEvents = $null
+    $State.ActiveChildPid = $null
+    $State.CurrentPhase = $null
+    $State.OperationId = $null
+    $State.CompletionHandled = $true
+    try { Set-UiOperationState -State $State -OperationState 'Idle' } catch { $State.OperationState = 'Idle' }
+    try { Write-LogBuffer -State $State } catch { }
+    return $true
+}
+
+function Request-UiOperationCancellation {
+    param([Parameter(Mandatory)][pscustomobject]$State)
+    if ([string]$State.OperationState -notin @('Starting', 'Running')) { return $false }
+    try { Set-UiOperationState -State $State -OperationState 'Cancelling' } catch { $State.OperationState = 'Cancelling' }
+    if ($State.OperationCancellation) {
+        try { $State.OperationCancellation.Cancel() } catch { }
+    }
+    Write-UiOperationLog -State $State -Message 'キャンセル要求を受け付けました。外部runnerのCancellationTokenを待機します。'
+    return $true
+}
+
+$script:UiNormalizeWorker = {
+    param($coreModulePath, $probeModulePath, $progressModulePath, $operationId, $dto, $cancellationSource, $events)
+    $ErrorActionPreference = 'Stop'
+    Import-Module $coreModulePath -Force
+    Import-Module $probeModulePath -Force
+    Import-Module $progressModulePath -Force
+    $coreState = New-MediaNormalizerState
+    $coreState.DurationMap = @{}
+    foreach ($entry in $dto.DurationMap.GetEnumerator()) { $coreState.DurationMap[[string]$entry.Key] = [double]$entry.Value }
+    $logger = {
+        param($message)
+        $text = [string]$message
+        [void]$events.Enqueue([pscustomobject]@{ Type = 'Log'; OperationId = $operationId; Message = $text; At = [DateTime]::UtcNow })
+        if ($text -match '\[DEBUG\].*ログ増加') {
+            [void]$events.Enqueue([pscustomobject]@{ Type = 'OutputGrowth'; OperationId = $operationId; At = [DateTime]::UtcNow })
+        }
+        if ($text -match '\[DEBUG\]') {
+            [void]$events.Enqueue([pscustomobject]@{ Type = 'Heartbeat'; OperationId = $operationId; At = [DateTime]::UtcNow })
+        }
+    }.GetNewClosure()
+    $lastChildPid = $null
+    $overallTotal = if ($dto.PSObject.Properties['TotalItems']) { [int]$dto.TotalItems } else { 0 }
+    if ($overallTotal -le 0) {
+        $overallTotal = [int](@($dto.Stages | ForEach-Object { @($_.TargetFiles).Count } | Measure-Object -Sum).Sum)
+    }
+    $progressContext = [pscustomobject]@{ StageOffset = 0; OverallTotal = $overallTotal }
+    $progress = {
+        param($current, $total)
+        $stageCurrent = [math]::Max(0, [int]$current - [int]$progressContext.StageOffset)
+        $overallCurrent = [math]::Min([int]$progressContext.OverallTotal,
+            [int]$progressContext.StageOffset + $stageCurrent)
+        $childPid = if ($coreState.RunningProcess) { [int]$coreState.RunningProcess.Id } else { $null }
+        if ($childPid -ne $lastChildPid) {
+            if ($lastChildPid) {
+                [void]$events.Enqueue([pscustomobject]@{
+                        Type = 'ChildExited'; OperationId = $operationId; ChildPid = $lastChildPid
+                        At = [DateTime]::UtcNow
+                    })
+            }
+            if ($childPid) {
+                [void]$events.Enqueue([pscustomobject]@{
+                        Type = 'ChildStarted'; OperationId = $operationId; ChildPid = $childPid
+                        Phase = [string]$coreState.CurrentPhase; At = [DateTime]::UtcNow
+                    })
+            }
+            $lastChildPid = $childPid
+        }
+        [void]$events.Enqueue([pscustomobject]@{
+                Type = 'Progress'; OperationId = $operationId; Current = $overallCurrent
+                Total = [int]$progressContext.OverallTotal
+                Phase = [string]$coreState.CurrentPhase; PhasePercent = [double]$coreState.PhaseProgressPercent
+                ChildPid = $childPid
+                At = [DateTime]::UtcNow
+            })
+    }.GetNewClosure()
+    $extensions = { @{ Audio = @(Get-AudioInputExtensions); Video = @(Get-VideoInputExtensions) } }
+    $stageResults = [Collections.Generic.List[object]]::new()
+    function Test-StageReportFailure {
+        param([Parameter(Mandatory)]$Result)
+        if ($Result -is [System.Collections.IDictionary]) {
+            return ($Result.Contains('ReportSucceeded') -and $Result.ReportSucceeded -eq $false)
+        }
+        return ($Result.PSObject.Properties['ReportSucceeded'] -and -not [bool]$Result.ReportSucceeded)
+    }
+    $stageOffset = 0
+    try {
+        foreach ($stage in @($dto.Stages)) {
+            if ($cancellationSource.Token.IsCancellationRequested) { break }
+            $stageItemCount = @($stage.TargetFiles).Count
+            $progressContext.StageOffset = $stageOffset
+            $stageResult = Invoke-Normalize `
+                -State $coreState -Mode ([string]$stage.Mode) `
+                -InputDir ([string]$dto.InputDir) -InputPaths @($dto.InputPaths) `
+                -OutputDir ([string]$dto.OutputDir) -Target ([double]$dto.Target) `
+                -TruePeak ([double]$dto.TruePeak) -Bitrate ([string]$dto.Bitrate) `
+                -SampleRate ([string]$dto.SampleRate) -CollisionPolicy ([string]$dto.CollisionPolicy) `
+                -TargetFiles @($stage.TargetFiles | ForEach-Object { [IO.FileInfo]$_ }) `
+                -Logger $logger -Progress $progress -GetTargetExtensions $extensions `
+                -SpeedPercentByPath $dto.SpeedPercentByPath -AudioOutputFormat ([string]$dto.AudioOutputFormat) `
+                -AnalyzeOnly:([bool]$dto.AnalyzeOnly) -SkipIfNormalized:([bool]$dto.SkipIfNormalized) `
+                -Recurse:([bool]$dto.Recurse) -PreserveHierarchy:([bool]$dto.PreserveHierarchy) `
+                -ReportPath ([string]$dto.ReportPath) -ReportMode ([string]$dto.ReportMode) `
+                -CancellationToken $cancellationSource.Token
+            $stageResults.Add($stageResult)
+            $stageOffset += $stageItemCount
+            if ([int]$stageResult.Fail -gt 0 -or [int]$stageResult.Cancelled -gt 0 -or
+                (Test-StageReportFailure -Result $stageResult)) { break }
+        }
+        $reason = if ($cancellationSource.Token.IsCancellationRequested) { 'Cancelled' }
+        elseif (@($stageResults | Where-Object {
+                $_.Fail -gt 0 -or
+                    (Test-StageReportFailure -Result $_)
+                }).Count -gt 0) { 'Failed' }
+        else { 'Succeeded' }
+        [void]$events.Enqueue([pscustomobject]@{ Type = 'Completed'; OperationId = $operationId; Reason = $reason; Result = $stageResults.ToArray(); At = [DateTime]::UtcNow })
+    } catch {
+        [void]$events.Enqueue([pscustomobject]@{ Type = 'Completed'; OperationId = $operationId; Reason = 'Failed'; Detail = $_.Exception.Message; At = [DateTime]::UtcNow })
+    }
+}
+
+function Start-UiOperation {
+    param([Parameter(Mandatory)][pscustomobject]$State, [Parameter(Mandatory)][pscustomobject]$Dto)
+    if ([string]$State.OperationState -ne 'Idle') { return $false }
+    $operationId = [guid]::NewGuid().ToString('N')
+    $State.OperationId = $operationId
+    $State.LastOperationId = $operationId
+    $State.OperationStartedAt = Get-Date
+    $State.CompletionHandled = $false
+    $State.FinalizationStarted = $false
+    $State.LastCompletionReason = 'None'
+    $State.OperationEvents = [Collections.Concurrent.ConcurrentQueue[object]]::new()
+    $State.OperationCancellation = [Threading.CancellationTokenSource]::new()
+    Write-UiOperationLog -State $State -Message 'operation開始'
+    try { Write-LogBuffer -State $State } catch { }
+    Set-UiOperationState -State $State -OperationState 'Starting'
+    $runspace = $null
+    $powerShell = $null
+    try {
+        $runspace = [RunspaceFactory]::CreateRunspace()
+        $runspace.ApartmentState = 'STA'
+        $runspace.ThreadOptions = 'ReuseThread'
+        $runspace.Open()
+        $powerShell = [PowerShell]::Create()
+        $powerShell.Runspace = $runspace
+        [void]$powerShell.AddScript($script:UiNormalizeWorker)
+        [void]$powerShell.AddArgument((Join-Path $PSScriptRoot 'MediaNormalizer.Core.psm1'))
+        [void]$powerShell.AddArgument((Join-Path $PSScriptRoot 'MediaNormalizer.Probe.psm1'))
+        [void]$powerShell.AddArgument((Join-Path $PSScriptRoot 'MediaNormalizer.Progress.psm1'))
+        [void]$powerShell.AddArgument($operationId)
+        [void]$powerShell.AddArgument($Dto)
+        [void]$powerShell.AddArgument($State.OperationCancellation)
+        [void]$powerShell.AddArgument($State.OperationEvents)
+        $async = $powerShell.BeginInvoke()
+        $State.WorkerHandle = [pscustomobject]@{ PowerShell = $powerShell; Runspace = $runspace; Async = $async; OperationId = $operationId }
+        Set-UiOperationState -State $State -OperationState 'Running'
+        return $true
+    } catch {
+        if ($powerShell) { try { $powerShell.Dispose() } catch { } }
+        if ($runspace) { try { $runspace.Close() } catch { }; try { $runspace.Dispose() } catch { } }
+        Complete-UiOperation -State $State -OperationId $operationId -Reason 'Failed' -Detail "worker起動失敗: $($_.Exception.Message)" | Out-Null
+        return $false
+    }
+}
+
+function Receive-UiOperationEvents {
+    param([Parameter(Mandatory)][pscustomobject]$State)
+    if (-not $State.OperationEvents -or -not $State.OperationId) { return }
+    $events = $State.OperationEvents
+    $event = $null
+    while ($events.TryDequeue([ref]$event)) {
+        if ([string]$event.OperationId -ne [string]$State.OperationId) { continue }
+        switch ([string]$event.Type) {
+            'Log' { Write-UiOperationLog -State $State -Message ([string]$event.Message) }
+            'Heartbeat' { $State.LastHeartbeatAt = [datetime]$event.At }
+            'OutputGrowth' { $State.LastOutputGrowthAt = [datetime]$event.At }
+            'ChildStarted' {
+                $State.ActiveChildPid = [int]$event.ChildPid
+                Write-UiOperationLog -State $State -Message (
+                    'child開始 pid={0} phase={1}' -f $event.ChildPid, $event.Phase)
+            }
+            'ChildExited' {
+                if ([int]$State.ActiveChildPid -eq [int]$event.ChildPid) {
+                    $State.ActiveChildPid = $null
+                }
+                Write-UiOperationLog -State $State -Message ('child終了 pid={0}' -f $event.ChildPid)
+            }
+            'Progress' {
+                $nextPhase = [string]$event.Phase
+                if ($nextPhase -and $nextPhase -ne [string]$State.CurrentPhase) {
+                    Write-UiOperationLog -State $State -Message ('phase={0}' -f $nextPhase)
+                }
+                $State.CurrentPhase = $nextPhase
+                $State.ActiveChildPid = $event.ChildPid
+                $State.LastHeartbeatAt = [datetime]$event.At
+                if ($State.Controls.ContainsKey('PnlProgressBg')) {
+                    Update-Progress -State $State -Current ([int]$event.Current) -Total ([int]$event.Total)
+                }
+            }
+            'Completed' {
+                $detail = if ($event.PSObject.Properties['Detail']) { [string]$event.Detail } else { $null }
+                Complete-UiOperation -State $State -OperationId ([string]$event.OperationId) `
+                    -Reason ([string]$event.Reason) -Detail $detail | Out-Null
+            }
+        }
+    }
+    if ($State.WorkerHandle -and $State.WorkerHandle.Async.IsCompleted -and -not $State.CompletionHandled) {
+        try { $null = @($State.WorkerHandle.PowerShell.EndInvoke($State.WorkerHandle.Async)) } catch {
+            Complete-UiOperation -State $State -OperationId ([string]$State.OperationId) -Reason 'Failed' `
+                -Detail "worker完了取得失敗: $($_.Exception.Message)" | Out-Null
+        }
+    }
+    if ($State.OperationState -ne 'Idle' -and $State.OperationStartedAt) {
+        $lastSignal = @($State.LastHeartbeatAt, $State.LastOutputGrowthAt, $State.OperationStartedAt) |
+            Where-Object { $_ } | ForEach-Object { [datetime]$_ } | Sort-Object | Select-Object -Last 1
+        if ($lastSignal -and ((Get-Date) - $lastSignal).TotalSeconds -ge [double]$State.OrphanTimeoutSeconds -and
+            (-not $State.WorkerHandle -or $State.WorkerHandle.Async.IsCompleted) -and
+            -not (Test-UiActiveChildProcess -State $State) -and
+            $events.IsEmpty) {
+            Complete-UiOperation -State $State -OperationId ([string]$State.OperationId) -Reason 'Orphaned' `
+                -Detail 'worker、外部処理、completion通知が失われたため孤立状態として復帰しました。' | Out-Null
+        }
+    }
 }
 
 function Get-FileRowStateKey {
@@ -1034,7 +1383,8 @@ function Update-FileGrid {
             if ($State.Controls.BtnRun) { $State.Controls.BtnRun.Enabled = $false }
             Start-ProbeTimer -State $State
         } else {
-            if ($State.Controls.BtnRun -and -not $State.RunningProcess) {
+            if ($State.Controls.BtnRun -and
+                (-not $State.PSObject.Properties['OperationState'] -or $State.OperationState -eq 'Idle')) {
                 $State.Controls.BtnRun.Enabled = $true
             }
         }
@@ -1342,7 +1692,8 @@ function Update-PendingProbeJobs {
         $State.ProbeSummary = $null
 
         # プローブ完了で「実行」を再有効化。ただし実行中（CancelRequested を待っている状態）は触らない
-        if ($scanValid -and $State.Controls.BtnRun -and -not $State.RunningProcess) {
+        if ($scanValid -and $State.Controls.BtnRun -and
+            (-not $State.PSObject.Properties['OperationState'] -or $State.OperationState -eq 'Idle')) {
             $State.Controls.BtnRun.Enabled = $true
         }
     }
@@ -1463,7 +1814,7 @@ function Invoke-NormalizeUi {
     $loggerSb   = { param($m) & $writeLogFn -State $stateRef -Message $m }.GetNewClosure()
     $progressSb = { param($current, $total) & $updateProgressFn -State $stateRef -Current $current -Total $total }.GetNewClosure()
     $extSb      = { & $getTargetExtensionsFn -State $stateRef }.GetNewClosure()
-    $pumpSb     = { [System.Windows.Forms.Application]::DoEvents() }
+    $pumpSb     = { }
 
     $params = @{
         State               = $State
@@ -1693,24 +2044,19 @@ function Register-MainFormEventHandlers {
     [scriptblock]$getPresetRationaleTextFn = ${function:Get-PresetRationaleText}
     [scriptblock]$getFileGridSelectionSnapshotFn = ${function:Get-FileGridSelectionSnapshot}
     [scriptblock]$getSpeedPercentMapFromGridFn = ${function:Get-SpeedPercentMapFromGrid}
-    [scriptblock]$invokeNormalizeUiFn = ${function:Invoke-NormalizeUi}
     [scriptblock]$resetProgressFn = ${function:Reset-Progress}
     [scriptblock]$saveFileGridSelectionStateFn = ${function:Save-FileGridSelectionStateFromGrid}
     [scriptblock]$saveSettingsFn = ${function:Save-Settings}
-    [scriptblock]$setUiEnabledFn = ${function:Set-UIEnabled}
+    [scriptblock]$requestCancellationFn = ${function:Request-UiOperationCancellation}
+    [scriptblock]$startOperationFn = ${function:Start-UiOperation}
     [scriptblock]$stopPendingProbeJobsFn = ${function:Stop-PendingProbeJobs}
     [scriptblock]$testPresetConfigurationMatchesFn = ${function:Test-PresetConfigurationMatches}
     [scriptblock]$updateProgressFn = ${function:Update-Progress}
     [scriptblock]$writeLogFn = ${function:Write-Log}
     [scriptblock]$writeLogBufferFn = ${function:Write-LogBuffer}
 
-    # フラグを立てて Invoke-Normalize のループ先頭で中断させる。実行中プロセスの終了は
-    # Invoke-MediaNormalizerProcess runner 側の CancelAction が一元的に担う。
     $c.BtnCancel.Add_Click({
-        if ($stateRef.CancelRequested) { return }
-        $stateRef.CancelRequested = $true
-        & $writeLogFn -State $stateRef -Message '[INFO ] キャンセル要求を受け付けました。実行中のプロセスを終了します...'
-        $stateRef.Controls.BtnCancel.Enabled = $false
+        & $requestCancellationFn -State $stateRef | Out-Null
     }.GetNewClosure())
 
     $c.BtnRun.Add_Click({
@@ -1725,7 +2071,6 @@ function Register-MainFormEventHandlers {
         }
         $stateRef.ReportPath = Join-Path $cc.TxtOutput.Text.Trim() (
             'media-normalizer-report-{0}.json' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
-        $stateRef.CancelRequested = $false
         & $resetProgressFn -State $stateRef
 
         $selectedPreset = $stateRef.Presets[[string]$cc.CmbPreset.SelectedItem]
@@ -1761,33 +2106,15 @@ function Register-MainFormEventHandlers {
             [System.Windows.Forms.MessageBoxIcon]::Information)
         if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
 
+        & $saveFileGridSelectionStateFn -State $stateRef
         if (-not $stateRef.ScanValid -or $cc.Dgv.Rows.Count -eq 0) {
-            & $writeLogFn -State $stateRef -Message '[INFO ] 一覧が未確認状態です。実行前に [確認] で対象を確認できます。'
-            if (-not $cc.ChkAudio.Checked -and -not $cc.ChkVideo.Checked) {
-                & $writeLogFn -State $stateRef -Message '[ERROR] 処理モードが選択されていません。少なくとも1つチェックしてください。'
-                return
-            }
-            & $setUiEnabledFn -State $stateRef -Enabled $false
-            $stateRef.ProgressCurrent = 0
-            $stateRef.ProgressTotal = 0
-            $stateRef.TotalDurationSec = 0.0
-            $stateRef.ProcessedDurationSec = 0.0
-            $stateRef.ProcessingStartTime = Get-Date
-            try {
-                if ($cc.ChkAudio.Checked) {
-                    & $invokeNormalizeUiFn -State $stateRef -Mode 'audio'
-                }
-                if ($cc.ChkVideo.Checked -and
-                    -not ($cc.ChkAnalyzeOnly.Checked -and $cc.ChkAudio.Checked)) {
-                    & $invokeNormalizeUiFn -State $stateRef -Mode 'video'
-                }
-            } finally {
-                & $setUiEnabledFn -State $stateRef -Enabled $true
-            }
+            & $writeLogFn -State $stateRef -Message '[ERROR] 実行前に [確認] を押して対象をスキャンしてください。未確認のまま処理は開始しません。'
             return
         }
-
-        & $saveFileGridSelectionStateFn -State $stateRef
+        if (-not $cc.ChkAudio.Checked -and -not $cc.ChkVideo.Checked) {
+            & $writeLogFn -State $stateRef -Message '[ERROR] 処理モードが選択されていません。少なくとも1つチェックしてください。'
+            return
+        }
         $snapshot = & $getFileGridSelectionSnapshotFn -State $stateRef
         if ($snapshot.Errors.Count -gt 0) {
             & $writeLogFn -State $stateRef -Message '[ERROR] ファイル一覧の状態が不整合です。実行を中止しました。'
@@ -1801,6 +2128,10 @@ function Register-MainFormEventHandlers {
             & $writeLogFn -State $stateRef -Message '[ERROR] チェックされたファイルがありません。音声・動画列にチェックを入れてください。'
             return
         }
+
+        $policyMap = @{ '連番付与' = 'rename'; 'スキップ' = 'skip'; '上書き' = 'overwrite' }
+        $policy = $policyMap[[string]$cc.CmbCollision.SelectedItem]
+        if (-not $policy) { $policy = 'rename' }
 
         $speedResult = & $getSpeedPercentMapFromGridFn `
             -State $stateRef -EffectiveTargetPaths $snapshot.ExecutionPaths
@@ -1819,38 +2150,58 @@ function Register-MainFormEventHandlers {
         $stateRef.ProcessedDurationSec = 0.0
         $stateRef.ProcessingStartTime = Get-Date
         & $updateProgressFn -State $stateRef -Current 0 -Total $stateRef.ProgressTotal
-
-        & $setUiEnabledFn -State $stateRef -Enabled $false
-        try {
-            if ($snapshot.ExecutionAudioFiles.Count -gt 0) {
-                & $invokeNormalizeUiFn -State $stateRef -Mode 'audio' `
-                    -TargetFiles $snapshot.ExecutionAudioFiles -SpeedPercentByPath $speedResult.Values
-            }
-            if ($snapshot.ExecutionVideoFiles.Count -gt 0) {
-                & $invokeNormalizeUiFn -State $stateRef -Mode 'video' `
-                    -TargetFiles $snapshot.ExecutionVideoFiles -SpeedPercentByPath $speedResult.Values
-            }
-        } finally {
-            & $setUiEnabledFn -State $stateRef -Enabled $true
+        $stageList = [Collections.Generic.List[object]]::new()
+        if ($snapshot.ExecutionAudioFiles.Count -gt 0) {
+            $stageList.Add([pscustomobject]@{
+                    Mode = 'audio'
+                    TargetFiles = @($snapshot.ExecutionAudioFiles | ForEach-Object FullName)
+                })
         }
+        if ($snapshot.ExecutionVideoFiles.Count -gt 0) {
+            $stageList.Add([pscustomobject]@{
+                    Mode = 'video'
+                    TargetFiles = @($snapshot.ExecutionVideoFiles | ForEach-Object FullName)
+                })
+        }
+        $dto = [pscustomobject]@{
+            InputDir = $cc.TxtInput.Text.Trim()
+            InputPaths = @($stateRef.InputSelectionPaths)
+            OutputDir = $cc.TxtOutput.Text.Trim()
+            Target = [double]$cc.NumTarget.Value
+            TruePeak = [double]$cc.NumTP.Value
+            Bitrate = [string]$cc.CmbBR.SelectedItem
+            SampleRate = [string]$cc.CmbSR.SelectedItem
+            CollisionPolicy = $policy
+            Stages = $stageList.ToArray()
+            DurationMap = @{}
+            SpeedPercentByPath = $speedResult.Values
+            AudioOutputFormat = [string]$cc.CmbAudioFormat.SelectedItem
+            AnalyzeOnly = [bool]$cc.ChkAnalyzeOnly.Checked
+            SkipIfNormalized = [bool]$cc.ChkSkipNormalized.Checked
+            Recurse = [bool]$cc.ChkRecurse.Checked
+            PreserveHierarchy = [bool]$cc.ChkPreserveHierarchy.Checked
+            ReportPath = $stateRef.ReportPath
+            ReportMode = if ($stageList.Count -gt 1) { 'both' } else { [string]$stageList[0].Mode }
+            TotalItems = [int]$snapshot.ExecutionCount
+        }
+        foreach ($key in $stateRef.DurationMap.Keys) { $dto.DurationMap[[string]$key] = [double]$stateRef.DurationMap[$key] }
+        & $startOperationFn -State $stateRef -Dto $dto | Out-Null
     }.GetNewClosure())
 
     # === FormClosing: request cancellation before closing & persist settings ===
     # Save-Settings は LogTimer Dispose と最終 Write-LogBuffer より前に呼ぶ。
     $Form.Add_FormClosing({
         param($sender, $eventArgs)
-        if ($stateRef.RunningProcess -and -not $stateRef.RunningProcess.HasExited) {
+        if ([string]$stateRef.OperationState -ne 'Idle') {
             $eventArgs.Cancel = $true
-            if (-not $stateRef.CancelRequested) {
+            if ([string]$stateRef.OperationState -ne 'Cancelling') {
                 $answer = [System.Windows.Forms.MessageBox]::Show(
                     '処理をキャンセルして終了しますか？',
                     'Media Normalizer',
                     [System.Windows.Forms.MessageBoxButtons]::YesNo,
                     [System.Windows.Forms.MessageBoxIcon]::Warning)
                 if ($answer -eq [System.Windows.Forms.DialogResult]::Yes) {
-                    $stateRef.CancelRequested = $true
-                    if ($stateRef.Controls.BtnCancel) { $stateRef.Controls.BtnCancel.Enabled = $false }
-                    & $writeLogFn -State $stateRef -Message '[INFO ] 終了要求を受け付けました。プロセスツリーを安全に停止しています...'
+                    & $requestCancellationFn -State $stateRef | Out-Null
                 }
             }
             return
@@ -1892,6 +2243,14 @@ function New-MainForm {
     $presets = Import-Presets -Warnings ([ref]$presetWarnings)
     foreach ($presetWarning in $presetWarnings) {
         Write-Log -State $State -Message "  [WARN ] $presetWarning"
+    }
+    $provenance = Get-BuildProvenance
+    if ($provenance) {
+        Write-Log -State $State -Message (
+            '[INFO ] build provenance: buildId={0} runtime={1} output={2}' -f
+            $provenance.BuildId, $provenance.Runtime, $provenance.OutputName)
+    } else {
+        Write-Log -State $State -Message '[INFO ] build provenance: source tree or provenance未配置'
     }
     $presetNames = @($presets.Keys)
     $State.Presets = $presets
@@ -2386,6 +2745,14 @@ function New-MainForm {
     $lblProgressTitle.Location = New-Object System.Drawing.Point(12, $y)
     $lblProgressTitle.AutoSize = $true
     $form.Controls.Add($lblProgressTitle)
+    $lblOperationStatus = New-Object System.Windows.Forms.Label
+    $lblOperationStatus.Text = '待機中'
+    $lblOperationStatus.Location = New-Object System.Drawing.Point(86, $y)
+    $lblOperationStatus.AutoSize = $false
+    $lblOperationStatus.Size = New-Object System.Drawing.Size(490, 18)
+    $lblOperationStatus.ForeColor = [System.Drawing.Color]::FromArgb(71, 85, 105)
+    $form.Controls.Add($lblOperationStatus)
+    $c.LblOperationStatus = $lblOperationStatus
     $y += 18
 
     $pnlProgressBg = New-Object System.Windows.Forms.Panel
