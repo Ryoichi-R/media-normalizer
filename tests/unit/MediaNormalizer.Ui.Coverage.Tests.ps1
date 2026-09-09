@@ -422,7 +422,7 @@ Describe 'MediaNormalizer.Ui coverage contracts' {
                     ProbeSummary = $null
                     RunningProcess = $false
                     LogBuffer = [Text.StringBuilder]::new()
-                    ProbeScript = $null
+                    ProbeScript = { param($path) -1.0 }
                     FfprobeAvailable = $false
                 }
                 Mock Start-ThreadJob { throw 'threadjob unavailable' }

@@ -1361,8 +1361,8 @@ function Update-FileGrid {
             foreach ($batch in @(Split-ProbePathBatch -FilePath $probePaths -BatchSize $script:ProbeBatchSize)) {
                 try {
                     $job = Start-ThreadJob `
-                        -ScriptBlock $script:ProbeBatchScriptBlock `
-                        -ArgumentList $State.ProbeScript, @($batch) `
+                        -ScriptBlock ([scriptblock]::Create($script:ProbeBatchScriptBlock.ToString())) `
+                        -ArgumentList ([scriptblock]::Create($State.ProbeScript.ToString())), @($batch) `
                         -ThrottleLimit 4
                     $State.PendingProbeJobs[$job.Id] = @($batch)
                 } catch {
@@ -1704,7 +1704,8 @@ function Start-ProbeTimer {
     $timer = New-Object System.Windows.Forms.Timer
     $timer.Interval = 100
     $stateRef = $State
-    $timer.Add_Tick({ Update-PendingProbeJobs -State $stateRef }.GetNewClosure())
+    [scriptblock]$updatePendingProbeJobsFn = ${function:Update-PendingProbeJobs}
+    $timer.Add_Tick({ & $updatePendingProbeJobsFn -State $stateRef }.GetNewClosure())
     $State.ProbeTimer = $timer
     $timer.Start()
 }
