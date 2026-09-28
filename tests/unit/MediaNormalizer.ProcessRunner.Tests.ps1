@@ -44,6 +44,7 @@ Describe 'Get-MediaInventory / Get-MediaLoudnessAnalysis から Invoke-MediaNorm
     #>
 
     BeforeEach {
+        Mock -ModuleName MediaNormalizer.Core Resolve-MediaNormalizerExecutable { param($Name) $Name.ToLowerInvariant() }
         $script:probeTempFile = [IO.Path]::GetTempFileName()
     }
 

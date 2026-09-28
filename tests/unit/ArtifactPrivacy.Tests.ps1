@@ -88,4 +88,29 @@ Describe 'Media Normalizer portable ZIP privacy inspection' {
         { & $script:privacyScript -ZipPath $zip } |
             Should -Throw '*local Windows user path candidate*'
     }
+
+    It 'accepts a clean macOS app archive' {
+        $zip = Join-Path $TestDrive 'mac-clean.zip'
+        New-TestZip -Path $zip -Entries @{ 'Example.app/Contents/Resources/data.bin' = [byte[]](1,2,3) }
+        (& $script:privacyScript -ZipPath $zip -MacArchive).Status | Should -Be 'OK'
+    }
+    It 'rejects macOS local paths, state and escaping archive entries' -ForEach @(
+        @{ Name='Example.app/Contents/Resources/data.bin'; Text='/Users/sample-owner/local'; Error='*path candidate*' },
+        @{ Name='Example.app/Contents/Resources/settings.json'; Text='{}'; Error='*Excluded artifact*' },
+        @{ Name='Example.app/../outside'; Text='x'; Error='*Unsafe archive path*' },
+        @{ Name='Example.app/Contents/Resources/id_rsa'; Text='x'; Error='*Secret-like file*' }
+    ) {
+        $zip = Join-Path $TestDrive ([guid]::NewGuid().ToString() + '.zip')
+        New-TestZip -Path $zip -Entries @{ $Name = [Text.Encoding]::UTF8.GetBytes($Text) }
+        { & $script:privacyScript -ZipPath $zip -MacArchive } | Should -Throw $Error
+    }
+    It 'rejects local paths and state from app directories' {
+        $app = Join-Path $TestDrive 'Test.app'
+        $null = New-Item -ItemType Directory -Path $app
+        Set-Content (Join-Path $app 'payload.bin') '/Users/sample-owner/private'
+        { & $script:privacyScript -AppPath $app } | Should -Throw '*path candidate*'
+        Set-Content (Join-Path $app 'payload.bin') 'safe'
+        Set-Content (Join-Path $app 'settings.json') '{}'
+        { & $script:privacyScript -AppPath $app } | Should -Throw '*Excluded artifact*'
+    }
 }

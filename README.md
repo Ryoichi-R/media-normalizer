@@ -66,7 +66,13 @@ FFmpegとPython runtimeを使用します。配布ZIPには動作に必要なrun
 
 ## 動作要件
 
-配布版のGUI/CLIはWindows 10/11と、Windows PowerShell 5.1またはPowerShell 7が
+macOS版はApple Silicon / macOS 15以降を対象とするAvalonia GUIとCLIです。
+PowerShell・Python・FFmpegを`.app`に同梱するため、利用時の別途インストールは不要です。
+macOS 27のApple Silicon実機で検証しています。macOS 15の実機受入は未実施です。
+構築・起動方法は[macOS手順](docs/MACOS-PORT.md#2026-09-29-avalonia-app)を参照してください。
+
+
+Windows版のGUI/CLIはWindows 10/11と、Windows PowerShell 5.1またはPowerShell 7が
 必要です。`media-normalizer.ps1`と診断スクリプトはPowerShell 5.1以上で動作する
 よう宣言されています。インストーラーの導入・更新処理もWindows PowerShell 5.1に
 対応しています。
@@ -318,8 +324,11 @@ portable版はMedia Normalizerの展開folderを削除します。installer版�
 
 ## 既知の制限
 
-GUI、installer、同梱runtimeはWindows専用です。配布ZIPはx64版とARM64版が別です。
-生成物は現時点ではコード署名されていないため、公開時はチェックサムと署名状態を明示します。
+Windows版は既存WinForms GUIとinstallerを維持し、x64/ARM64を別々に構築します。
+macOS版はApple Silicon専用の`.app`です。Intel MacとmacOS installerは対象外です。
+macOS成果物はローカルのad-hoc署名で、Developer ID署名・公証は行っていません。
+Finder/Dock経由の最小化解除・前面化の目視受入とWindows非回帰検査は未完了です。
+Windows/macOS間の数値比較は今回の実装範囲から除外しています。
 DRM保護された入力や、同梱FFmpegが対応しないcodecは処理できません。
 
 ## セキュリティ

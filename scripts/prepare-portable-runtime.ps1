@@ -5,7 +5,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('win-x64', 'win-arm64')]
+    [ValidateSet('win-x64', 'win-arm64', 'osx-arm64')]
     [string]$Runtime,
     [Parameter(Mandatory)]
     [string]$PackageRoot,
@@ -310,6 +310,11 @@ $dependencies = Get-Content -LiteralPath $manifestFull -Raw -Encoding UTF8 |
     ConvertFrom-Json -ErrorAction Stop
 if ([int]$dependencies.schemaVersion -ne 1) {
     throw "Unsupported portable dependency manifest schema: $($dependencies.schemaVersion)"
+}
+
+if ($Runtime -eq 'osx-arm64') {
+    . (Join-Path $PSScriptRoot 'prepare-macos-runtime.ps1')
+    return
 }
 
 $ffmpegRuntime = $dependencies.ffmpeg.runtimes.PSObject.Properties[$Runtime].Value

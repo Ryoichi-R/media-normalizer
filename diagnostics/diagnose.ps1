@@ -6,6 +6,13 @@
     Loads the main GUI script and writes startup/runtime errors to diagnose.log.
 #>
 
+# macOS diagnostics use the same verified-runtime checks as CLI startup.
+if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)) {
+    $runtimeRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'runtime'
+    & (Join-Path $PSScriptRoot 'runtime-check.ps1') -RuntimeRoot $runtimeRoot
+    exit $LASTEXITCODE
+}
+
 $diagLog = Join-Path $PSScriptRoot 'diagnose.log'
 "=== Diagnose Start: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ===" | Out-File -LiteralPath $diagLog -Encoding utf8
 

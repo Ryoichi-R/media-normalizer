@@ -50,6 +50,24 @@ BeforeAll {
 }
 
 Describe 'Media Normalizer worker entry' {
+    It 'serializes Core object events and completes normalization preflight' {
+        $input = Join-Path $TestDrive 'empty-input'
+        $output = Join-Path $TestDrive 'empty-output'
+        $null = New-Item -ItemType Directory -Path $input
+        $command = Get-Content -LiteralPath (Join-Path $script:repoRoot 'contracts/fixtures/worker-protocol/command-normalize.json') -Raw | ConvertFrom-Json -AsHashtable
+        $command.inputPaths = @($input)
+        $command.outputDir = $output
+        $command.speedPercentByPath = @{}
+        $command.reportPath = $null
+        $result = Invoke-MediaNormalizerWorkerFixture -Command $command -StorageRoot (Join-Path $TestDrive 'worker-state')
+        $result.ExitCode | Should -BeIn @(0, 1)
+        $events = @($result.StdoutText -split "`r?`n" | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json -AsHashtable })
+        @($events | Where-Object { $_.type -eq 'log' }).Count | Should -BeGreaterThan 0
+        foreach ($event in $events) { (Test-MediaNormalizerWorkerEvent -Message $event).IsValid | Should -BeTrue }
+        $events[-1].type | Should -Be 'run-done'
+        @($events | Where-Object { $_.type -eq 'error' -and $_.code -eq 'WORKER_FAILED' }).Count | Should -Be 0
+    }
+
     It 'answers capabilities with one valid NDJSON event' {
         $command = @{ schemaVersion = 1; id = 'c0000000-0000-4000-8000-000000000001'; cmd = 'capabilities' }
         $result = Invoke-MediaNormalizerWorkerFixture -Command $command

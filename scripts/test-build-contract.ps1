@@ -205,6 +205,10 @@ try {
     $requiredPortableFiles = Import-PowerShellDataFile -LiteralPath (
         Join-Path $projectRoot 'scripts\media-normalizer-required-files.psd1')
     Assert-Contract (
+        @($requiredPortableFiles.MacAppRequiredRelativePaths) -contains 'Contents/Resources/gui/MediaNormalizer.Gui' -and
+        @($requiredPortableFiles.MacAppRequiredRelativePaths) -contains 'Contents/Resources/scripts/mn-worker.ps1'
+    ) 'macOS app must require its GUI and worker.'
+    Assert-Contract (
         @($requiredPortableFiles.RequiredRelativePaths) -contains 'MediaNormalizer.exe'
     ) 'Portable package must require MediaNormalizer.exe.'
     Assert-Contract (

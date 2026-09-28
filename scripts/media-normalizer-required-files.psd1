@@ -27,4 +27,27 @@
         'runtime\python\python.exe',
         'runtime\python\python313.dll'
     )
+    MacAppRequiredRelativePaths = @(
+        'Contents/Info.plist',
+        'Contents/MacOS/media-normalizer',
+        'Contents/Resources/gui/MediaNormalizer.Gui',
+        'Contents/Resources/gui/MediaNormalizer.Gui.dll',
+        'Contents/Resources/scripts/mn-worker.ps1',
+        'Contents/Resources/assets/presets.json',
+        'Contents/Resources/lib/MediaNormalizer.Core.psm1',
+        'Contents/Resources/lib/MediaNormalizer.Platform.psm1',
+        'Contents/Resources/lib/MediaNormalizer.RunRecovery.psm1',
+        'Contents/Resources/lib/MediaNormalizer.WorkerProtocol.psm1',
+        'Contents/Resources/diagnostics/runtime-check.ps1',
+        'Contents/Resources/diagnostics/runtime-check-macos.ps1',
+        'Contents/Resources/runtime-check.sh',
+        'Contents/Resources/runtime-env.sh',
+        'Contents/Resources/LICENSE',
+        'Contents/Resources/THIRD-PARTY-NOTICES.md',
+        'Contents/Resources/runtime/dependency-manifest.json',
+        'Contents/Resources/runtime/ffmpeg/bin/ffmpeg',
+        'Contents/Resources/runtime/ffmpeg/bin/ffprobe',
+        'Contents/Resources/runtime/python/bin/python3',
+        'Contents/Resources/runtime/powershell/pwsh'
+    )
 }

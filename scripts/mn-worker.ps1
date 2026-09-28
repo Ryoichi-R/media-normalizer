@@ -20,7 +20,7 @@ $script:WorkerInput = [IO.StreamReader]::new([Console]::OpenStandardInput(), [Te
 
 function Write-MediaNormalizerWorkerEvent {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][Collections.IDictionary]$Event)
+    param([Parameter(Mandatory)][object]$Event)
 
     $validation = Test-MediaNormalizerWorkerEvent -Message $Event
     if (-not $validation.IsValid) {
@@ -167,10 +167,10 @@ function Invoke-MediaNormalizerWorkerNormalize {
     $workerContext.EventSink = $eventsOut
     $state = New-MediaNormalizerState
     Add-Member -InputObject $state -MemberType NoteProperty -Name WorkerProtocolContext -Value $workerContext
-    $ioState = [pscustomobject]@{ PendingRead = $null; Closed = $false; State = $state; Context = $workerContext }
+    $ioState = [pscustomobject]@{ Reader = $script:WorkerInput; PendingRead = $null; Closed = $false; State = $state; Context = $workerContext }
     $inputPump = {
         while (-not $ioState.Closed) {
-            if ($null -eq $ioState.PendingRead) { $ioState.PendingRead = $script:WorkerInput.ReadLineAsync() }
+            if ($null -eq $ioState.PendingRead) { $ioState.PendingRead = $ioState.Reader.ReadLineAsync() }
             if (-not $ioState.PendingRead.IsCompleted) { break }
             $line = $ioState.PendingRead.GetAwaiter().GetResult()
             $ioState.PendingRead = $null
@@ -214,7 +214,11 @@ function Invoke-MediaNormalizerWorkerNormalize {
                     $ioState.Context.PendingProcessAcks[$token] = @{
                         accepted = [bool]$message.accepted
                         processId = [int]$message.processId
-                        processStartedAtUtc = $message.processStartedAtUtc
+                        processStartedAtUtc = if ($message.processStartedAtUtc -is [datetime]) {
+                            $message.processStartedAtUtc.ToUniversalTime().ToString('o')
+                        } elseif ($message.processStartedAtUtc -is [DateTimeOffset]) {
+                            $message.processStartedAtUtc.ToString('o')
+                        } else { [string]$message.processStartedAtUtc }
                     }
                     if ([int]$message.processId -ne [int]$expected.processId) {
                         $ioState.Context.FatalError = 'Host process identity acknowledgement does not match the observed PID.'
@@ -244,7 +248,7 @@ function Invoke-MediaNormalizerWorkerNormalize {
     $totals = @{ Success = 0; Analyzed = 0; Fail = 0; Cancelled = 0; Skipped = 0 }
     $reportPath = $options.ReportPath
     $reportSucceeded = $true
-    $modes = if ($options.Mode -eq 'both') { @('audio', 'video') } else { @($options.Mode) }
+    $modes = if ($options.Mode -eq 'both') { if ($options.AnalyzeOnly) { @('audio') } else { @('audio', 'video') } } else { @($options.Mode) }
     $null = Write-MediaNormalizerWorkerEvent -Event ([ordered]@{
         schemaVersion = 1; type = 'run-start'; runId = $options.RunId; mode = $options.Mode
     })
@@ -253,6 +257,7 @@ function Invoke-MediaNormalizerWorkerNormalize {
             $parameters = @{
                 State = $state
                 Mode = $mode
+                ReportMode = $options.Mode
                 InputDir = $options.InputDir
                 InputPaths = $options.InputPath
                 OutputDir = $options.OutputDir
@@ -277,9 +282,10 @@ function Invoke-MediaNormalizerWorkerNormalize {
                 CliMode = $true
             }
             $result = Invoke-Normalize @parameters
-            foreach ($counter in $totals.Keys) { $totals[$counter] += [int]$result[$counter] }
-            if ($result.ReportPath) { $reportPath = [string]$result.ReportPath }
+            foreach ($counter in @($totals.Keys)) { $totals[$counter] += [int]$result[$counter] }
+            if ($result.ContainsKey('ReportPath') -and $result.ReportPath) { $reportPath = [string]$result.ReportPath }
             if ($result.ContainsKey('ReportSucceeded') -and -not $result.ReportSucceeded) { $reportSucceeded = $false }
+            if ($totals.Cancelled -gt 0) { break }
         }
         if ($workerContext.FatalError) { throw "[RECOVERY_REQUIRED] $($workerContext.FatalError)" }
         if ($workerContext.RecoveryRequired) { throw '[RECOVERY_REQUIRED] Worker could not confirm host process registration.' }

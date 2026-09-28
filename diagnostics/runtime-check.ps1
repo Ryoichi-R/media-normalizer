@@ -8,6 +8,15 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)) {
+    if (-not $PSBoundParameters.ContainsKey('RuntimeRoot')) {
+        $RuntimeRoot = Join-Path (Split-Path -Parent $PSScriptRoot) 'runtime'
+    }
+    & (Join-Path $PSScriptRoot 'runtime-check-macos.ps1') -RuntimeRoot $RuntimeRoot -Quiet:$Quiet
+    exit $LASTEXITCODE
+}
+
+
 function Add-RuntimeCheck {
     param(
         [Parameter(Mandatory)]

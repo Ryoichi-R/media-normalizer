@@ -26,7 +26,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('win-x64', 'win-arm64')]
+    [ValidateSet('win-x64', 'win-arm64', 'osx-arm64')]
     [string]$Runtime,
     [string]$OutputRoot,
     [switch]$SelectOutputRoot,
@@ -44,6 +44,16 @@ $ErrorActionPreference = 'Stop'
 
 if ($CleanBuild -and -not [string]::IsNullOrWhiteSpace($PreparedRuntimeRoot)) {
     throw 'CleanBuild cannot be combined with PreparedRuntimeRoot.'
+}
+
+if ($Runtime -eq 'osx-arm64') {
+    if ($SelectOutputRoot) { throw 'For macOS specify -OutputRoot explicitly.' }
+    $macOutput = if ($OutputRoot) { [IO.Path]::GetFullPath($OutputRoot) } else { Join-Path (Split-Path $PSScriptRoot -Parent) 'artifacts/osx-arm64' }
+    $macCache = Join-Path $macOutput $(if ($CleanBuild) { 'dependency-cache-' + [guid]::NewGuid().ToString('N') } else { 'dependency-cache' })
+    $appPath = Join-Path $macOutput 'Media Normalizer.app'
+    & (Join-Path $PSScriptRoot 'build-media-normalizer-app-bundle.ps1') -OutputAppPath $appPath -CacheRoot $macCache -PreparedRuntimeRoot $PreparedRuntimeRoot
+    & (Join-Path $PSScriptRoot 'test-artifact-integrity.ps1') -AppPath $appPath
+    return
 }
 
 function ConvertTo-GuardedDirectoryPath {

@@ -9,6 +9,7 @@ $script:MediaNormalizerSecretFilePatterns = @(
     '\.pfx$'
     '\.p12$'
     '^credentials\.'
+    '^id_(rsa|dsa|ecdsa|ed25519)$'
 )
 
 function Test-SecretFilePath {

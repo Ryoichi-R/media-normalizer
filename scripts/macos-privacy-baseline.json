@@ -1,0 +1,227 @@
+{
+  "schemaVersion": 1,
+  "files": [
+    {
+      "path": "Contents/Resources/runtime/ffmpeg/bin/ffmpeg",
+      "sha256": "893c740e184fbe365e318ededf0884d84f2886fb4ffc776d9976fa46d58a511d",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/ffmpeg/bin/ffprobe",
+      "sha256": "4f53eb9b7a7826a26a5e1d18803fcc803900a7c76c6d99147094dce36f9dcb42",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/python/lib/python3.13/secrets.py",
+      "sha256": "277000574358a6ecda4bb40e73332ae81a3bc1c8e1fa36f50e5c6a7d4d3f0f17",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": true
+    },
+    {
+      "path": "Contents/Resources/runtime/python/lib/python3.13/ctypes/macholib/dyld.py",
+      "sha256": "eb8e7b17f1533bc3e86e23e8695f7a5e4b7a99ef1b1575d10af54f389161b655",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/python/lib/python3.13/site-packages/pip/_internal/utils/urls.py",
+      "sha256": "2505ab440a171c1a4fb18f408a3eb56ec6633102c272ecab50ed51e96fc1c08a",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/python/lib/python3.13/site-packages/pip/_internal/locations/_distutils.py",
+      "sha256": "8e9163e15d34ac3f48477bc0f53aab1a4c1c74d545739f0bb028596af81ef496",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/python/lib/python3.13/site-packages/pip/_vendor/certifi/cacert.pem",
+      "sha256": "bbc7e9c01d7551bb8a159b5dedd989b8ee3ce105aff522b68eb1b01bf854cab0",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": true
+    },
+    {
+      "path": "Contents/Resources/runtime/python/lib/python3.13/site-packages/pip/_vendor/platformdirs/macos.py",
+      "sha256": "3d6b9d78364063d52ec0b3ffe6b3777b149116d61d639e368438636a1e1d4960",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/python/lib/python3.13/idlelib/macosx.py",
+      "sha256": "3f2cd04d8c1eb8f38936120825501a5cc754dde7981d778c96f5ee8ee0cb95fd",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/powershell/Microsoft.PowerShell.Commands.Management.dll",
+      "sha256": "e5072628aec8475ac5063c950fc318cc8779d7a8b8e194fca29b0fa8bd72febe",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/powershell/libcoreclr.dylib",
+      "sha256": "0572d2644f96c526e46f1b5063a91ea0cc15a704227dc5cc034278758421ab87",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/powershell/Microsoft.PowerShell.SDK.dll",
+      "sha256": "2b436661c8397de292ea5b12d0ce916b04cbb1a025179de7e520c267dfa648d8",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/powershell/pwsh.dll",
+      "sha256": "df7fe87de112b241b2322480bbcd4b6318e975ec45453a43ef065fb2a717c8e2",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/powershell/Microsoft.PowerShell.Security.dll",
+      "sha256": "a2b04384069b7d9f7abfca2fc42be81312eb5b3177579e43a7bccf691281e229",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/powershell/Microsoft.PowerShell.ConsoleHost.dll",
+      "sha256": "c0e6f5b9a64a10a0d89117712b851b57140fd3459c4a52cb4da2be8fa3b324b8",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/powershell/libmscordaccore.dylib",
+      "sha256": "c17ee1c54fcf1c3dca2906ca72092f2fb951cc21ddd8f2dd44365c9fb060dabd",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/powershell/psoptions.json",
+      "sha256": "a87e145a70e6ee2122ccb930d013bc1e1d90b9f9f50655ff49977a5d433991ee",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/powershell/libmscordbi.dylib",
+      "sha256": "18f9020417e096eae5456f120be63d3f83136ac6eff133b69afcd73c4c393045",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/powershell/System.Management.Automation.dll",
+      "sha256": "238fb6bd4af3dfc6bac3e6c7edcdeabd0da858d74eed0fd94f55f9f5a7f08fcb",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/powershell/Microsoft.PowerShell.Commands.Utility.dll",
+      "sha256": "cfce9c42fc71ec078041f37cf79d3c4205f79858a916159dc33bd8a6d63c0f22",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/powershell/libpsl-native.dylib",
+      "sha256": "0b3ba43df23f576336cd7c9d85c7dcaaac9c4af73a7d8a325d83b38549822ff6",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/powershell/libclrjit.dylib",
+      "sha256": "5fc7c2afbddd4b7f96f802934ef66a92ea486a66f15d7ba4f432ec0c884d8f91",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/gui/libcoreclr.dylib",
+      "sha256": "1c237a538c54ad4a9f8474100562f5b0206526cc4c62e434782fe61a8946cb0d",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/gui/libAvaloniaNative.dylib",
+      "sha256": "c86eb60656b94311a6ef43e9e6ac7753d7f117ccc45b9b0b5bdc70a18c5788b9",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/gui/libmscordaccore.dylib",
+      "sha256": "a0df5cdb56cc809f9f90258c171acd048a016bbd6a4cd0e176ec50e99011889e",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/gui/libmscordbi.dylib",
+      "sha256": "5c8a04ecc1fc882854cf16edad6cdd41c2d4c06b3e706474cbab1d66148a9650",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/gui/libclrjit.dylib",
+      "sha256": "0a26b0f82b3169b9418c356879015f257bb82bf010e32db4450fd399050cec5e",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/python/lib/python3.13/site-packages/pip/_vendor/distlib/w64-arm.exe",
+      "sha256": "c5dc9884a8f458371550e09bd396e5418bf375820a31b9899f6499bf391c7b2e",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/python/lib/python3.13/site-packages/pip/_vendor/distlib/w32.exe",
+      "sha256": "47872cc77f8e18cf642f868f23340a468e537e64521d9a3a416c8b84384d064b",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/python/lib/python3.13/site-packages/pip/_vendor/distlib/t32.exe",
+      "sha256": "6b4195e640a85ac32eb6f9628822a622057df1e459df7c17a12f97aeabc9415b",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/python/lib/python3.13/site-packages/pip/_vendor/distlib/w64.exe",
+      "sha256": "7a319ffaba23a017d7b1e18ba726ba6c54c53d6446db55f92af53c279894f8ad",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/python/lib/python3.13/site-packages/pip/_vendor/distlib/t64-arm.exe",
+      "sha256": "ebc4c06b7d95e74e315419ee7e88e1d0f71e9e9477538c00a93a9ff8c66a6cfc",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/python/lib/python3.13/site-packages/pip/_vendor/distlib/t64.exe",
+      "sha256": "81a618f21cb87db9076134e70388b6e9cb7c2106739011b6a51772d22cae06b7",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/python/lib/python3.13/site-packages/pip/_vendor/platformdirs/windows.py",
+      "sha256": "60e75218d85da719bfc9d66aeee1bbe22f665f6fd659b70c480e1fa1b5f02f43",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/python/lib/python3.13/venv/scripts/common/Activate.ps1",
+      "sha256": "eb8ce20f580877d300c4fed60a7f36daa18715d35c50bb3596d6995d023b4ffe",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/python/lib/python3.13/idlelib/config-main.def",
+      "sha256": "02e5473f5dfdf9264173286c5c5f8f544eae0330a837981b61c9062b98e80ba5",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    },
+    {
+      "path": "Contents/Resources/runtime/powershell/Modules/Microsoft.PowerShell.PSResourceGet/Microsoft.PowerShell.PSResourceGet.dll",
+      "sha256": "c9eccb0e5313ced30e7da3903c27f1a97c6e8b0793a0a91160c4bee346f3ee02",
+      "reason": "Pinned upstream runtime/library content; no local user data.",
+      "allowSecretLikeName": false
+    }
+  ]
+}

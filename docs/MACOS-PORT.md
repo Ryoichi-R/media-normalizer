@@ -1,6 +1,6 @@
 # macOS Apple Silicon port
 
-Updated: 2026-09-27 (Asia/Tokyo)
+Updated: 2026-09-28 (Asia/Tokyo)
 
 This document records the staged macOS port. The supported target is Apple Silicon (`osx-arm64`). The Windows WinForms application remains intact during the migration.
 
@@ -41,9 +41,9 @@ For a PoC-only local signing check, sign nested Mach-O files from deepest path t
 
 The macOS runtime archive, architecture, package-tag, Core import, and Avalonia PoC checks are recorded above. On the macOS 27 Apple Silicon development host, the PoC was published as an arm64 self-contained app, nested Mach-O files were ad-hoc signed, the post-signature manifest was generated, and the outer app passed `codesign --verify --deep --strict`. LaunchServices `open -n -W` launched the app and it remained alive during the smoke check. The test processes were stopped afterward. The quarantine isolation check was also completed on this temporary app: a quarantine attribute was applied to the app and a temporary sibling file, removed only from the normalized app path, and verified to remain on the sibling. `codesign --verify --deep --strict` still passed afterward. P0-7 is complete for this PoC fixture; this is not a distribution notarization test.
 
-P0-8's same-fixture Windows/macOS report comparison remains open because this host has no Windows runtime. The plan requires both fixed FFmpeg builds to run on their native systems. Phase 0 is therefore incomplete. The plan's R9 explicitly allows Phase 4 implementation to proceed before this comparison; Phase 3 and later product acceptance remain gated on P0-8. Phases 1 and 2 were implemented only to the extent allowed by their own stop conditions; their Windows and Ubuntu validation gates remain open.
+On 2026-09-28 the owner explicitly removed Windows/macOS comparison from the current work and requested continued implementation on Mac. P0-8 is not performed and no longer blocks implementation of later phases. Cross-OS numeric equivalence and Windows regression remain unverified; neither is recorded as passed.
 
-`docs/FFMPEG-COMPARISON-SAMPLE.md` now describes a P0-8 starter kit: an eight-file synthetic corpus generator, a cross-machine SHA-256 verifier, and a blank report-comparison receipt. The current shell has no FFmpeg executable on PATH, so the binary corpus and measurement receipt were not generated here. Generate it once with the pinned binary, copy it unchanged to both systems, then verify the hashes before collecting reports.
+The comparison starter-kit sources remain available, but no Windows handoff or comparison is required for the current implementation work.
 
 ## Implementation status
 
@@ -72,7 +72,7 @@ P0-8's same-fixture Windows/macOS report comparison remains open because this ho
 - Added a dependency-free `net10.0` `WorkerSupervisor` service and console harness. The service persists host/worker/process identities, validates NDJSON fields and types, verifies PID/start-time pairs, monitors descendants, and distinguishes a concurrent job (`JOB_ALREADY_RUNNING`, exit 3) from an unresolved recovery (`RECOVERY_REQUIRED`, exit 4).
 - Added host-startup recovery for valid GUI run records: stop verified descendants using TERM then KILL, reacquire the normalization job lock, remove only registered run-scoped files, and mark the record complete only after cleanup. Invalid identities, unresolved process-start intents, lock conflicts, and unsafe paths remain blocked for diagnosis.
 - The harness exercises real worker capabilities and process registration, job-conflict exit 3, incomplete-stream handling, worker `RECOVERY_REQUIRED` exit 4, worker nonzero exit, a TERM-resistant descendant requiring KILL, registered temporary-file cleanup, recovery from a persisted run after host restart, and fail-closed suppression when a process start has no matching acknowledgement. It does not launch or kill an Avalonia host; that integration belongs to the later GUI phase.
-- Phase 4 remains partial: the Windows output-regression gate is unavailable here, and the Avalonia host is not yet integrated. The plan's R9 permits this Phase 4 implementation before P0-8, while Phase 3 and later product acceptance remain gated.
+- Phase 4 remains partial: the Windows output-regression gate is unavailable here, and the Avalonia host is not yet integrated. The owner decision above permits further Mac implementation.
 
 ### Phase 5: settings persistence foundation (partial)
 
@@ -90,4 +90,110 @@ pwsh -NoLogo -NoProfile -Command '$c=New-PesterConfiguration; $c.Run.Path="tests
 
 Result: 311 tests discovered across 41 files; 278 passed, 0 failed, and 33 were not run because they are tagged `WindowsOnly`. The targeted Phase 4 suite passed 41 tests with 0 failures. The `WorkerSupervisorHarness` build completed with 0 warnings and 0 errors, and its macOS run passed the worker protocol, job-conflict exit 3, incomplete-stream handling, `RECOVERY_REQUIRED` exit 4, in-host recovery, host-restart recovery, TERM/KILL, cleanup, and suppression checks. All 34 contract and fixture JSON files parsed, and PowerShell parsing passed for the four changed runtime entry/module files. `git -c core.whitespace=cr-at-eol diff --check` passed. The repository's `scripts/check-module-toplevel.ps1` and `.config/formatter/` are absent, so those workspace-wide checks are unavailable in this standalone repository. These results do not substitute for the plan's Windows suite, Ubuntu 24.04 import run, or P0-8 comparison.
 
-Settings v2 now retains additive unknown fields in both the PowerShell implementation and the C# `SettingsStore`; PowerShell and C# tests use shared fixtures. Unsupported future schema versions still fall back to defaults under the existing version policy. P0-8 remains open because no Windows runtime is available on this host; Phase 3 and later remain gated on that comparison.
+Settings v2 now retains additive unknown fields in both the PowerShell implementation and the C# `SettingsStore`; PowerShell and C# tests use shared fixtures. Unsupported future schema versions still fall back to defaults under the existing version policy. P0-8 is excluded by the owner decision above; Mac implementation continues.
+
+## 2026-09-28: bundled macOS CLI
+
+`prepare-portable-runtime.ps1 -Runtime osx-arm64` now downloads the already pinned FFmpeg, ffprobe, Python, PowerShell and pure Python wheels, verifies archive hashes, preserves runtime notices, signs native binaries locally, and writes post-signature critical-file hashes. The archive pins remain independent of those hashes. The full PowerShell archive is retained.
+
+Build a CLI-only package on an Apple Silicon Mac with build-time PowerShell:
+
+```powershell
+pwsh -NoProfile -File scripts/build-media-normalizer-cli-package.ps1 -OutputRoot <new-package-directory> -CacheRoot <dependency-cache-directory>
+```
+
+The output directory must not already exist. A failed build remains available for diagnosis; use a new output directory for a retry. The generated package contains `media-normalizer.sh`, `runtime-check.sh`, and `diagnose.sh`. Run `./media-normalizer.sh -InputPath <media> -OutputDir <output>` for normalization, optionally adding `-Mode video` or `-AnalyzeOnly`. The shell entrypoint selects CLI mode automatically. This package does not yet contain the Avalonia GUI or a Finder `.app`.
+
+The bootstrap validates the bundled PowerShell hash before executing it. The shared PowerShell runtime diagnostic then checks required manifest entries, hashes, root-contained symbolic links, arm64 Mach-O headers, executable permissions, pinned versions, Python package import, loudnorm, required encoders, and temporary-volume write access/free space. Failure prevents CLI startup; no PATH fallback is used. Python user-site loading and bytecode writes are disabled in these child processes.
+
+Real CLI startup exposed forced nested Platform module imports removing commands from the entrypoint, which also bypassed its macOS job/recovery lock. Core, Probe, UiLogic, and RunRecovery now import their common dependency without forcing its removal. A fresh-process regression checks that all entrypoint platform commands survive these imports.
+
+Mac verification on 2026-09-28: the generated runtime passed diagnostic checks after local signing; 30 critical-file hashes were recorded. Shell startup succeeded with development PowerShell absent from PATH and after relocating the package to a path containing Japanese text and spaces. WAV, FLAC, MP3, M4A, MP4 and multistream MKV normalized successfully. The MKV output retained video=1, audio=2, subtitle=1 and chapters=2. Both-mode analysis reported seven analyzed files and one expected corrupt-input failure. Real-runtime hash corruption was rejected. Bootstrap/build-helper/download tests and the related import, command-resolution, recovery, settings, Core and worker tests passed (61 distinct tests). These are Mac results only.
+
+Phase 3 packaging integration with the existing Windows artifact/build-contract entrypoints remains unfinished. Avalonia presentation, completed `.app` packaging, activation and full acceptance work also remain. The existing Windows artifact pipeline has not been declared verified by these checks.
+
+
+## 2026-09-29: Avalonia app
+
+This section supersedes earlier statements that GUI and app packaging are unimplemented.
+
+### Build and run
+
+On an Apple Silicon Mac with build-time .NET 10 SDK and PowerShell:
+
+```powershell
+pwsh -NoProfile -File scripts/rebuild-media-normalizer.ps1 -Runtime osx-arm64 -OutputRoot <new-output-directory>
+```
+
+For an already verified prepared runtime, add `-PreparedRuntimeRoot <runtime-directory>`.
+Archive pins and Python package versions/hashes must match `portable-dependencies.json`.
+The output app must not already exist. Failed outputs are retained; retry in a new directory.
+NuGet dependencies use `packages.lock.json` and locked restore. Build telemetry is disabled.
+
+Open `Media Normalizer.app` from Finder. The thin `Contents/MacOS/media-normalizer` launcher
+starts the self-contained host under `Contents/Resources/gui`; the latter location avoids
+treating managed DLLs as nested native code during bundle signing. CLI usage is also available:
+
+```sh
+"Media Normalizer.app/Contents/Resources/media-normalizer.sh" -InputPath <media> -OutputDir <output>
+```
+
+The app includes input pickers, drag/drop, Core-backed scan, per-file selection and speed,
+mode/format/target/peak settings, presets and rationale/current-value match, analysis-only,
+recursive discovery, preserved hierarchy, collision policy, confirmation, progress/ETA,
+cancellation, and bounded persistent logs. Selection and individual speed survive rescans;
+changing global speed applies the new speed on the next scan. User presets are merged by name
+from `~/Library/Application Support/media-normalizer/presets.user.json`.
+
+Settings use the shared v2 contract and retain unknown fields. User state and locks are under
+`~/Library/Application Support/media-normalizer`; logs are under
+`~/Library/Logs/media-normalizer`. No mutable app data is stored in `Contents`.
+Tests may inject an isolated directory through `--storage-root`.
+
+### Signing and integrity
+
+Pinned upstream archives are hash-verified before extraction. Native runtime binaries are
+ad-hoc signed before critical-file hashes are recorded in the dependency manifest. Published
+native GUI files and then the outer app are signed. Prepared runtime signatures are preserved;
+upstream bytecode caches are removed only from the newly copied runtime. The build runs
+`codesign --verify --deep --strict`, the shared runtime diagnostic, and the app privacy gate.
+Ad-hoc signing is for this local build; Developer ID signing/notarization is not provided.
+
+`build-media-normalizer-app-bundle.ps1 -RemoveQuarantine` applies `xattr -dr` only to the
+normalized, newly built `.app` path. It does not change parent/sibling folders. The normal
+build leaves quarantine unchanged. Finder quarantine behavior still needs manual acceptance.
+
+```powershell
+pwsh -File scripts/test-artifact-integrity.ps1 -AppPath <app>
+pwsh -File scripts/test-zip-privacy.ps1 -AppPath <app>
+pwsh -File scripts/test-zip-privacy.ps1 -ZipPath <mac-zip> -MacArchive
+```
+
+The Mac scanners reject local user paths, state/log/bytecode files, secret-like filenames,
+unsafe archive paths and escaping symlinks. Reviewed upstream build paths/examples are
+allowed only at exact paths with exact SHA-256 values in `macos-privacy-baseline.json`.
+The Python standard-library `secrets.py` and public certifi CA bundle are likewise exact-hash
+exceptions; they are not user credentials. The current user's home path is always rejected.
+
+### Acceptance evidence and remaining limits
+
+On 2026-09-29, the macOS unit suite passed 286 tests (33 Windows-only tests excluded), and
+12 CLI bootstrap/runtime-build integration tests passed. SettingsStore round-trip and
+WorkerSupervisor recovery harnesses passed. Avalonia.Headless exercised actual bundled
+normalization, cancellation/recovery, scan invalidation, selection retention, user presets,
+settings, missing-runtime refusal, valid/malformed activation, mismatched instance/version,
+timeout, stale endpoint and concurrent startup. The GUI build has zero warnings/errors.
+A self-contained native launch without development tools on PATH and direct second-launch
+ACK succeeded. Final app and ZIP integrity/privacy checks succeeded.
+
+Cancellation arriving before process-registration ACK is deferred until registration finishes;
+then Core stops the process and emits its exit identity. This avoids an unverified-exit recovery
+block. Recovery retains fail-closed behavior for missing/rejected ACK or unknown process identity.
+
+Finder/Dock minimize/foreground behavior has a handler but remains visually unverified:
+the native UI automation tool timed out while selecting this app. Headless rendered layout
+was inspected. Full host-kill-during-descendant-creation acceptance, long/HDR input matrix,
+macOS 15 runtime acceptance, Windows regression and cross-OS numeric comparison are not
+claimed complete. The owner excluded the cross-OS comparison from this implementation.
+Workspace formatter/lint entrypoints reject this external standalone project; their invocation
+failed at inventory resolution. C# warning-as-error builds and PowerShell unit checks succeeded.

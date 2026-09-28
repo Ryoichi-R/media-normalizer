@@ -24,6 +24,8 @@ public sealed class WorkerSupervisor : IDisposable
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
+    private readonly IReadOnlyDictionary<string, string?>? _environment;
+    public event Action<string>? StatusChanged;
     private readonly string _pwshPath;
     private readonly string _workerScriptPath;
     private readonly string _storageRoot;
@@ -53,7 +55,8 @@ public sealed class WorkerSupervisor : IDisposable
         string storageRoot,
         string pwshPath,
         string workerScriptPath,
-        Action<JsonElement>? eventHandler = null)
+        Action<JsonElement>? eventHandler = null,
+        IReadOnlyDictionary<string, string?>? environment = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(storageRoot);
         ArgumentException.ThrowIfNullOrWhiteSpace(pwshPath);
@@ -68,6 +71,7 @@ public sealed class WorkerSupervisor : IDisposable
         _pwshPath = Path.GetFullPath(pwshPath);
         _workerScriptPath = Path.GetFullPath(workerScriptPath);
         _eventHandler = eventHandler;
+        _environment = environment;
     }
 
     /// <summary>Acquires the host-only GUI instance lock. The returned handle must live for the host lifetime.</summary>
@@ -166,7 +170,7 @@ public sealed class WorkerSupervisor : IDisposable
             return new WorkerRecoveryResult(true, true, _runId, _record.RecoveryMessage);
         }
 
-        await SetStatusAsync("recovering", cancellationToken).ConfigureAwait(false);
+        await SetStatusAsync("recovering", CancellationToken.None).ConfigureAwait(false);
         if (!await RecoverKnownProcessesAsync(cancellationToken).ConfigureAwait(false))
         {
             await SetRecoveryRequiredAsync(_record.RecoveryMessage, CancellationToken.None).ConfigureAwait(false);
@@ -260,6 +264,10 @@ public sealed class WorkerSupervisor : IDisposable
             StandardOutputEncoding = new UTF8Encoding(false),
             StandardErrorEncoding = new UTF8Encoding(false)
         };
+        if (_environment is not null)
+        {
+            foreach (var pair in _environment) { startInfo.Environment[pair.Key] = pair.Value; }
+        }
         startInfo.ArgumentList.Add("-NoLogo");
         startInfo.ArgumentList.Add("-NoProfile");
         startInfo.ArgumentList.Add("-NonInteractive");
@@ -317,7 +325,7 @@ public sealed class WorkerSupervisor : IDisposable
 
             if (needsRecovery)
             {
-                await SetStatusAsync("recovering", cancellationToken).ConfigureAwait(false);
+                await SetStatusAsync("recovering", CancellationToken.None).ConfigureAwait(false);
                 if (_monitorFailure is not null)
                 {
                     await SetRecoveryRequiredAsync($"Process-tree monitoring failed: {_monitorFailure}", CancellationToken.None).ConfigureAwait(false);
@@ -1485,6 +1493,7 @@ public sealed class WorkerSupervisor : IDisposable
             var json = JsonSerializer.Serialize(_record, JsonOptions);
             await File.WriteAllTextAsync(temporaryPath, json, new UTF8Encoding(false), cancellationToken).ConfigureAwait(false);
             File.Move(temporaryPath, _recordPath, true);
+            StatusChanged?.Invoke(_record.Status);
         }
         finally
         {

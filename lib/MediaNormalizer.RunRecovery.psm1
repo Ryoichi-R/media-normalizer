@@ -1,5 +1,5 @@
 Set-StrictMode -Version Latest
-Import-Module (Join-Path $PSScriptRoot 'MediaNormalizer.Platform.psm1') -Force -Scope Local -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot 'MediaNormalizer.Platform.psm1') -Scope Local -DisableNameChecking
 
 function New-MediaNormalizerRunRecord {
     [CmdletBinding()]

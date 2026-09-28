@@ -66,6 +66,7 @@ Describe 'Test-LoudnessParameter 境界値 (AC-1 相当のロジック検証)' {
 
 Describe 'Get-MediaLoudnessAnalysis の loudnorm フィルタ (AC-5 / 事実 3)' {
     BeforeEach {
+        Mock -ModuleName MediaNormalizer.Core Resolve-MediaNormalizerExecutable { param($Name) $Name.ToLowerInvariant() }
         $script:probeTempFile = [IO.Path]::GetTempFileName()
     }
 
@@ -297,6 +298,7 @@ Describe 'Invoke-Normalize -AnalyzeOnly と Get-MediaLoudnessAnalysis 直接呼�
     }
 
     It 'Invoke-Normalize -AnalyzeOnly は範囲外値を拒否するが、Get-MediaLoudnessAnalysis の直接呼出しは同じ値でも解析できる' {
+        Mock -ModuleName MediaNormalizer.Core Resolve-MediaNormalizerExecutable { param($Name) $Name.ToLowerInvariant() }
         Mock -ModuleName MediaNormalizer.Core Invoke-MediaNormalizerProcess {
             param($FilePath)
             if ($FilePath -eq 'ffprobe') {

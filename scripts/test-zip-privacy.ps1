@@ -1,10 +1,17 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$ZipPath
+    [Parameter(Mandatory, ParameterSetName = 'Zip')][string]$ZipPath,
+    [Parameter(Mandatory, ParameterSetName = 'MacApp')][string]$AppPath,
+    [Parameter(ParameterSetName = 'Zip')][switch]$MacArchive
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($PSCmdlet.ParameterSetName -eq 'MacApp') {
+    & (Join-Path $PSScriptRoot 'test-macos-artifact.ps1') -AppPath $AppPath -PrivacyOnly
+    return
+}
+
 . (Join-Path $PSScriptRoot 'shared\secret-patterns.ps1')
 
 $zipFull = [IO.Path]::GetFullPath($ZipPath)
@@ -17,47 +24,7 @@ if (-not (Test-Path -LiteralPath $zipFull -PathType Leaf) -or
 }
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-if ($null -eq ('MediaNormalizerZipPrivacyScanner' -as [type])) {
-    Add-Type -TypeDefinition @'
-using System;
-using System.IO;
-
-public static class MediaNormalizerZipPrivacyScanner
-{
-    public static bool ContainsAny(Stream stream, byte[][] patterns)
-    {
-        if (patterns == null || patterns.Length == 0) return false;
-        var maximumPatternLength = 0;
-        foreach (var pattern in patterns)
-        {
-            if (pattern != null && pattern.Length > maximumPatternLength)
-                maximumPatternLength = pattern.Length;
-        }
-        if (maximumPatternLength == 0) return false;
-
-        const int chunkLength = 65536;
-        var buffer = new byte[chunkLength + maximumPatternLength - 1];
-        var carry = 0;
-        while (true)
-        {
-            var read = stream.Read(buffer, carry, chunkLength);
-            if (read == 0) return false;
-            var available = carry + read;
-            var haystack = new ReadOnlySpan<byte>(buffer, 0, available);
-            foreach (var pattern in patterns)
-            {
-                if (pattern != null && pattern.Length > 0 && haystack.IndexOf(pattern) >= 0)
-                    return true;
-            }
-
-            carry = Math.Min(maximumPatternLength - 1, available);
-            if (carry > 0)
-                Buffer.BlockCopy(buffer, available - carry, buffer, 0, carry);
-        }
-    }
-}
-'@
-}
+. (Join-Path $PSScriptRoot 'shared/artifact-privacy-stream.ps1')
 
 $patterns = [Collections.Generic.List[byte[]]]::new()
 foreach ($root in @('C:\Users\', 'C:/Users/', 'c:\users\', 'c:/users/')) {
@@ -66,6 +33,10 @@ foreach ($root in @('C:\Users\', 'C:/Users/', 'c:\users\', 'c:/users/')) {
 }
 $patternArray = [byte[][]]$patterns.ToArray()
 
+if ($MacArchive) {
+    & (Join-Path $PSScriptRoot 'test-macos-archive-privacy.ps1') -ZipPath $zipFull
+    return
+}
 $archive = [IO.Compression.ZipFile]::OpenRead($zipFull)
 $entryCount = 0
 try {

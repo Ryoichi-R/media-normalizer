@@ -1,5 +1,6 @@
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Legacy')]
 param(
+    [Parameter(Mandatory, ParameterSetName = 'MacApp')][string]$AppPath,
     [Parameter(ParameterSetName = 'Legacy')]
     [Parameter(ParameterSetName = 'Candidate')]
     [ValidateSet('win-x64', 'win-arm64')]
@@ -16,6 +17,11 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if ($PSCmdlet.ParameterSetName -eq 'MacApp') {
+    & (Join-Path $PSScriptRoot 'test-macos-artifact.ps1') -AppPath $AppPath
+    return
+}
+
 . (Join-Path $PSScriptRoot 'shared\secret-patterns.ps1')
 
 $projectRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))

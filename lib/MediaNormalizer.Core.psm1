@@ -1,5 +1,5 @@
 Set-StrictMode -Version Latest
-Import-Module (Join-Path $PSScriptRoot 'MediaNormalizer.Platform.psm1') -Force -Scope Local -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot 'MediaNormalizer.Platform.psm1') -Scope Local -DisableNameChecking
 
 # 入力ファイル候補の拡張子リスト（モジュールスコープで一箇所に集約）。
 # Audio は音声ファイルの直接入力と、動画コンテナからの音声出力の両方を扱う。
@@ -1120,7 +1120,7 @@ function Wait-MediaNormalizerProcessWithProgress {
 
     while (-not $ProcessLike.HasExited) {
         if ($OutputPump) { & $OutputPump }
-        if ($PumpEvents -and -not $CliMode) { & $PumpEvents }
+        if ($PumpEvents -and (-not $CliMode -or $State.PSObject.Properties['WorkerProtocolContext'])) { & $PumpEvents }
         Start-Sleep -Milliseconds $SleepMilliseconds
         if ($OutputPump) { & $OutputPump }
 
@@ -1232,9 +1232,8 @@ function Wait-MediaNormalizerWorkerProcessRegistration {
             }
             return
         }
-        if (Test-MediaNormalizerCancellationRequested -State $State) {
-            throw [OperationCanceledException]::new('Cancelled before process registration was acknowledged.')
-        }
+        # A started process must finish the registration handshake even when cancellation arrives.
+        # The following wait stops it and emits process-exited after its identity is acknowledged.
         Start-Sleep -Milliseconds 25
     }
     $Context.RecoveryRequired = $true
