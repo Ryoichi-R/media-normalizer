@@ -1,4 +1,4 @@
-#Requires -Modules Pester
+﻿#Requires -Modules Pester
 
 Set-StrictMode -Version Latest
 
@@ -244,6 +244,10 @@ Describe 'Invoke-Normalize 範囲外ラウドネスパラメータの入口拒�
     It '範囲内なら入口検証を通過する（外部プロセスはMockで模擬）' {
         Mock -ModuleName MediaNormalizer.Core Find-FfmpegNormalize { [pscustomobject]@{ Cmd = 'ffmpeg-normalize'; Args = @() } }
         Mock -ModuleName MediaNormalizer.Core Get-Command { [pscustomobject]@{ Source = 'fake' } }
+        Mock -ModuleName MediaNormalizer.Platform Get-Command {
+            param($Name)
+            [pscustomobject]@{ Source = $Name }
+        }
         Mock -ModuleName MediaNormalizer.Core Invoke-MediaNormalizerProcess {
             param($FilePath)
             if ($FilePath -eq 'ffprobe') {
@@ -404,7 +408,7 @@ Describe 'Import-Presets の警告伝播 (AC-2)' {
     }
 
     It 'map.Count が 0 になるフォールバック経路で理由を警告へ追記する' {
-        InModuleScope MediaNormalizer.Ui {
+        InModuleScope MediaNormalizer.UiLogic {
             Mock ConvertTo-PresetMap { @{} }
             $warnings = [Collections.Generic.List[string]]::new()
 
@@ -417,7 +421,7 @@ Describe 'Import-Presets の警告伝播 (AC-2)' {
     }
 
     It '-Warnings を省略しても従来どおり動作する（後方互換）' {
-        InModuleScope MediaNormalizer.Ui {
+        InModuleScope MediaNormalizer.UiLogic {
             Mock ConvertTo-PresetMap { @{} }
             { Import-Presets } | Should -Not -Throw
             (Import-Presets).Count | Should -BeGreaterThan 0

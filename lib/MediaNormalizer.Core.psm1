@@ -1,4 +1,5 @@
-﻿Set-StrictMode -Version Latest
+Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot 'MediaNormalizer.Platform.psm1') -Force -Scope Local -DisableNameChecking
 
 # 入力ファイル候補の拡張子リスト（モジュールスコープで一箇所に集約）。
 # Audio は音声ファイルの直接入力と、動画コンテナからの音声出力の両方を扱う。
@@ -111,12 +112,19 @@ function Get-RelativeMediaPath {
         [IO.Path]::DirectorySeparatorChar,
         [IO.Path]::AltDirectorySeparatorChar)
     $pathFull = [IO.Path]::GetFullPath($Path)
-    $baseUri = [Uri]($baseFull + [IO.Path]::DirectorySeparatorChar)
-    $pathUri = [Uri]$pathFull
-    $relative = [Uri]::UnescapeDataString(
-        $baseUri.MakeRelativeUri($pathUri).ToString()).Replace(
-            [IO.Path]::AltDirectorySeparatorChar,
-            [IO.Path]::DirectorySeparatorChar)
+    if ((Get-MediaNormalizerPlatform) -eq 'Windows') {
+        # Keep the existing Windows URI behavior unchanged.
+        $baseUri = [Uri]($baseFull + [IO.Path]::DirectorySeparatorChar)
+        $pathUri = [Uri]$pathFull
+        $relative = [Uri]::UnescapeDataString(
+            $baseUri.MakeRelativeUri($pathUri).ToString()).Replace(
+                [IO.Path]::AltDirectorySeparatorChar,
+                [IO.Path]::DirectorySeparatorChar)
+    } else {
+        # System.Uri treats POSIX paths as relative URIs; Path.GetRelativePath is correct for
+        # absolute macOS/Linux filesystem paths and is available in the bundled PowerShell 7.
+        $relative = [IO.Path]::GetRelativePath($baseFull, $pathFull)
+    }
     if ($relative -eq '..' -or
         $relative.StartsWith('..' + [IO.Path]::DirectorySeparatorChar) -or
         [IO.Path]::IsPathRooted($relative)) {
@@ -152,7 +160,12 @@ function Resolve-MediaOutputDirectory {
     $rootWithSeparator = $outputFull.TrimEnd(
         [IO.Path]::DirectorySeparatorChar,
         [IO.Path]::AltDirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
-    if (-not $candidate.StartsWith($rootWithSeparator, [StringComparison]::OrdinalIgnoreCase)) {
+    $comparison = if ((Get-MediaNormalizerPlatform) -eq 'Windows') {
+        [StringComparison]::OrdinalIgnoreCase
+    } else {
+        [StringComparison]::Ordinal
+    }
+    if (-not $candidate.StartsWith($rootWithSeparator, $comparison)) {
         throw "出力階層が出力ルート外を指しています: $candidate"
     }
     return $candidate
@@ -231,13 +244,28 @@ function Get-MediaInputRoot {
 
 function New-SafeOutputPath {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$FinalPath)
+    param(
+        [Parameter(Mandatory)][string]$FinalPath,
+        [string]$RunId
+    )
 
     $directory = Split-Path -Parent ([IO.Path]::GetFullPath($FinalPath))
     $extension = [IO.Path]::GetExtension($FinalPath)
     $baseName = [IO.Path]::GetFileNameWithoutExtension($FinalPath)
+    $runMarker = if ($RunId) { "$RunId-" } else { '' }
     Join-Path $directory (".{0}.media-normalizer-{1}{2}" -f
-        $baseName, [guid]::NewGuid().ToString('N'), $extension)
+        $baseName, $runMarker, ([guid]::NewGuid().ToString('N') + $extension))
+}
+
+function Resolve-MediaNormalizerExecutable {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][ValidateSet('FFmpeg', 'FFprobe')][string]$Name)
+
+    $resolved = Resolve-MediaNormalizerCommand -Name $Name
+    if (-not [string]::IsNullOrWhiteSpace($resolved)) { return $resolved }
+    # CLI preflight reports a missing system command. Keeping the conventional name here
+    # preserves direct Core calls and lets injected process runners be tested without tools.
+    return $Name.ToLowerInvariant()
 }
 
 function Get-MediaInventory {
@@ -261,7 +289,7 @@ function Get-MediaInventory {
         $FilePath
     )
     $result = Invoke-MediaNormalizerProcess `
-        -FilePath 'ffprobe' `
+        -FilePath (Resolve-MediaNormalizerExecutable -Name FFprobe) `
         -Arguments $arguments `
         -State $State `
         -PhaseLabel '情報取得中' `
@@ -318,7 +346,9 @@ function Get-MediaInventory {
 
     return [pscustomobject]@{
         Path         = [IO.Path]::GetFullPath($FilePath)
-        Length       = (Get-Item -LiteralPath $FilePath).Length
+        # Normalization stages are deliberately dot-prefixed. PowerShell's
+        # filesystem provider hides those paths unless Get-Item uses -Force.
+        Length       = (Get-Item -LiteralPath $FilePath -Force).Length
         DurationSec  = $duration
         StreamCounts = $streamCounts
         ChapterCount = if ($probe.PSObject.Properties['chapters']) { @($probe.chapters).Count } else { 0 }
@@ -504,7 +534,7 @@ function Get-MediaLoudnessAnalysis {
             '-'
         )
         $result = Invoke-MediaNormalizerProcess `
-            -FilePath 'ffmpeg' `
+            -FilePath (Resolve-MediaNormalizerExecutable -Name FFmpeg) `
             -Arguments $arguments `
             -State $State `
             -PhaseLabel $PhaseLabel `
@@ -1064,6 +1094,7 @@ function Wait-MediaNormalizerProcessWithProgress {
         [string]$LongRunningMessage = '長時間処理中です。動画サイズ次第で数分以上かかることがあります。',
         [int]$SlowWarnSeconds = 120,
         [scriptblock]$CancelAction,
+        [scriptblock]$OutputPump,
         [Alias('UpdateElapsedFromProgress')]
         [bool]$TrackElapsedForEta = $true,
         [bool]$TrackPhaseProgress = $false,
@@ -1088,8 +1119,10 @@ function Wait-MediaNormalizerProcessWithProgress {
     $cancelSignalled = $false
 
     while (-not $ProcessLike.HasExited) {
+        if ($OutputPump) { & $OutputPump }
         if ($PumpEvents -and -not $CliMode) { & $PumpEvents }
         Start-Sleep -Milliseconds $SleepMilliseconds
+        if ($OutputPump) { & $OutputPump }
 
         if ((Test-MediaNormalizerCancellationRequested -State $State -CancellationToken $CancellationToken) -and
             -not $cancelSignalled -and -not $ProcessLike.HasExited) {
@@ -1147,6 +1180,130 @@ function Wait-MediaNormalizerProcessWithProgress {
     }
 }
 
+function Send-MediaNormalizerWorkerProcessEvent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)][string]$Type,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Fields
+    )
+
+    $event = [ordered]@{ schemaVersion = 1; type = $Type }
+    foreach ($key in $Fields.Keys) { $event[$key] = $Fields[$key] }
+    $null = $Context.EventSink.Invoke([pscustomobject]$event)
+}
+
+function Get-MediaNormalizerProcessStartUtc {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][Diagnostics.Process]$Process)
+
+    try {
+        return [DateTimeOffset]::new($Process.StartTime.ToUniversalTime()).ToString('o')
+    } catch {
+        throw "[RECOVERY_REQUIRED] process開始時刻を取得できません: pid=$($Process.Id)"
+    }
+}
+
+function Wait-MediaNormalizerWorkerProcessRegistration {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][string]$ProcessToken,
+        [Parameter(Mandatory)][int]$ProcessId,
+        [Parameter(Mandatory)][string]$ProcessStartedAtUtc,
+        [Parameter(Mandatory)][pscustomobject]$State,
+        [scriptblock]$PumpEvents
+    )
+
+    $timeoutSeconds = if ($Context.AckTimeoutSeconds -gt 0) { [int]$Context.AckTimeoutSeconds } else { 10 }
+    $deadline = [DateTime]::UtcNow.AddSeconds($timeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if ($PumpEvents) { $null = $PumpEvents.Invoke() }
+        if ($Context.PendingProcessAcks.ContainsKey($ProcessToken)) {
+            $ack = $Context.PendingProcessAcks[$ProcessToken]
+            $Context.PendingProcessAcks.Remove($ProcessToken)
+            if (-not $ack.accepted) { $Context.RecoveryRequired = $true; throw "[RECOVERY_REQUIRED] host rejected process registration: pid=$ProcessId" }
+            $ackStartedAt = [DateTimeOffset]::Parse([string]$ack.processStartedAtUtc).UtcTicks
+            $expectedStartedAt = [DateTimeOffset]::Parse($ProcessStartedAtUtc).UtcTicks
+            if ([int]$ack.processId -ne $ProcessId -or $ackStartedAt -ne $expectedStartedAt) {
+                $Context.RecoveryRequired = $true
+                throw "[RECOVERY_REQUIRED] host process registration ACK identity mismatch: pid=$ProcessId"
+            }
+            return
+        }
+        if (Test-MediaNormalizerCancellationRequested -State $State) {
+            throw [OperationCanceledException]::new('Cancelled before process registration was acknowledged.')
+        }
+        Start-Sleep -Milliseconds 25
+    }
+    $Context.RecoveryRequired = $true
+    throw "[RECOVERY_REQUIRED] host process registration ACK timed out: pid=$ProcessId, runId=$RunId"
+}
+
+function Register-MediaNormalizerWorkerTemporaryOutput {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Context,
+        [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][string]$InputPath,
+        [Parameter(Mandatory)][string]$TemporaryPath,
+        [Parameter(Mandatory)][string]$FinalPath,
+        [Parameter(Mandatory)][ValidateSet('primary', 'speed')][string]$Role,
+        [Parameter(Mandatory)][pscustomobject]$State,
+        [scriptblock]$PumpEvents
+    )
+
+    $fullTemporaryPath = [IO.Path]::GetFullPath($TemporaryPath)
+    if ($Context.ExpectedTemporaryPaths.ContainsKey($fullTemporaryPath)) {
+        throw "[RECOVERY_REQUIRED] duplicate temporary output registration: $fullTemporaryPath"
+    }
+    $Context.ExpectedTemporaryPaths[$fullTemporaryPath] = $true
+    Send-MediaNormalizerStructuredEvent -EventSink $Context.EventSink -Type 'temporary-output' -Fields @{
+        runId = $RunId; inputPath = [IO.Path]::GetFullPath($InputPath)
+        temporaryPath = $fullTemporaryPath; finalPath = [IO.Path]::GetFullPath($FinalPath); role = $Role
+    }
+
+    $timeoutSeconds = if ($Context.AckTimeoutSeconds -gt 0) { [int]$Context.AckTimeoutSeconds } else { 10 }
+    $deadline = [DateTime]::UtcNow.AddSeconds($timeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if ($PumpEvents) { $null = $PumpEvents.Invoke() }
+        if ($Context.PendingTemporaryAcks.ContainsKey($fullTemporaryPath)) {
+            $ack = $Context.PendingTemporaryAcks[$fullTemporaryPath]
+            $Context.PendingTemporaryAcks.Remove($fullTemporaryPath)
+            $Context.ExpectedTemporaryPaths.Remove($fullTemporaryPath)
+            if (-not $ack.accepted) {
+                $Context.RecoveryRequired = $true
+                throw "[RECOVERY_REQUIRED] host rejected temporary output registration: $fullTemporaryPath"
+            }
+            return
+        }
+        if (Test-MediaNormalizerCancellationRequested -State $State) {
+            throw [OperationCanceledException]::new('Cancelled before temporary output registration was acknowledged.')
+        }
+        Start-Sleep -Milliseconds 25
+    }
+    $Context.RecoveryRequired = $true
+    throw "[RECOVERY_REQUIRED] host temporary output registration ACK timed out: $fullTemporaryPath"
+}
+
+function Register-NormalizationTemporaryOutputIfSupported {
+    param(
+        [Parameter(Mandatory)][pscustomobject]$State,
+        [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][string]$InputPath,
+        [Parameter(Mandatory)][string]$TemporaryPath,
+        [Parameter(Mandatory)][string]$FinalPath,
+        [Parameter(Mandatory)][ValidateSet('primary', 'speed')][string]$Role,
+        [scriptblock]$PumpEvents
+    )
+
+    if ($State.PSObject.Properties['WorkerProtocolContext'] -and $State.WorkerProtocolContext.EventSink) {
+        Register-MediaNormalizerWorkerTemporaryOutput -Context $State.WorkerProtocolContext -RunId $RunId -InputPath $InputPath `
+            -TemporaryPath $TemporaryPath -FinalPath $FinalPath -Role $Role -State $State -PumpEvents $PumpEvents
+    }
+}
+
 function Invoke-MediaNormalizerProcess {
     <#
         外部プロセス(ffmpeg/ffprobe/ffmpeg-normalize等)の起動・待機・キャンセル・後始末を
@@ -1200,20 +1357,117 @@ function Invoke-MediaNormalizerProcess {
     if ($Progress) { & $Progress $State.ProgressCurrent $State.ProgressTotal }
 
     $proc = $null
+    $useWindowsStartProcess = (Get-MediaNormalizerPlatform) -eq 'Windows'
+    $stdoutWriter = $null
+    $stderrWriter = $null
+    $streamState = $null
+    $outputPump = $null
+    $retainTemporaryLogs = $false
+    $workerContext = if ($State.PSObject.Properties['WorkerProtocolContext']) { $State.WorkerProtocolContext } else { $null }
+    $processToken = [guid]::NewGuid().ToString('D')
+    $processStartedAtUtc = $null
+    $parentProcess = [Diagnostics.Process]::GetCurrentProcess()
+    $parentStartedAtUtc = [DateTimeOffset]::new($parentProcess.StartTime.ToUniversalTime()).ToString('o')
     try {
-        $proc = Start-Process `
-            -FilePath $FilePath `
-            -ArgumentList (ConvertTo-ProcessArgumentList -Arguments $effectiveArguments) `
-            -NoNewWindow `
-            -PassThru `
-            -RedirectStandardOutput $stdoutTmp `
-            -RedirectStandardError $stderrTmp
+        if ($workerContext) {
+            Send-MediaNormalizerWorkerProcessEvent -Context $workerContext -Type 'process-starting' -Fields @{
+                runId = $workerContext.RunId; processToken = $processToken; executablePath = $FilePath
+                arguments = @($effectiveArguments); parentProcessId = $PID; parentStartedAtUtc = $parentStartedAtUtc
+            }
+        }
+        if ($useWindowsStartProcess) {
+            # WindowsのStart-Process / 引数引用規則は既存経路をそのまま保つ。
+            $proc = Start-Process `
+                -FilePath $FilePath `
+                -ArgumentList (ConvertTo-ProcessArgumentList -Arguments $effectiveArguments) `
+                -NoNewWindow `
+                -PassThru `
+                -RedirectStandardOutput $stdoutTmp `
+                -RedirectStandardError $stderrTmp
+            if ($workerContext) {
+                try { $processStartedAtUtc = Get-MediaNormalizerProcessStartUtc -Process $proc }
+                catch { $workerContext.RecoveryRequired = $true; throw }
+            }
+        } else {
+            $startInfo = [Diagnostics.ProcessStartInfo]::new()
+            $startInfo.FileName = $FilePath
+            $startInfo.UseShellExecute = $false
+            $startInfo.CreateNoWindow = $true
+            $startInfo.RedirectStandardOutput = $true
+            $startInfo.RedirectStandardError = $true
+            foreach ($argument in $effectiveArguments) {
+                $startInfo.ArgumentList.Add([string]$argument)
+            }
+
+            $proc = [Diagnostics.Process]::new()
+            $proc.StartInfo = $startInfo
+            $stdoutWriter = [IO.StreamWriter]::new($stdoutTmp, $false, [Text.UTF8Encoding]::new($false))
+            $stderrWriter = [IO.StreamWriter]::new($stderrTmp, $false, [Text.UTF8Encoding]::new($false))
+            $stdoutWriter.AutoFlush = $true
+            $stderrWriter.AutoFlush = $true
+            if (-not $proc.Start()) { throw "外部processを開始できませんでした: $FilePath" }
+            if ($workerContext) {
+                try { $processStartedAtUtc = Get-MediaNormalizerProcessStartUtc -Process $proc }
+                catch { $workerContext.RecoveryRequired = $true; throw }
+            }
+            $streamState = [pscustomobject]@{
+                StdoutReader = $proc.StandardOutput
+                StderrReader = $proc.StandardError
+                StdoutBuffer = [char[]]::new(4096)
+                StderrBuffer = [char[]]::new(4096)
+                StdoutTask = $null
+                StderrTask = $null
+                StdoutComplete = $false
+                StderrComplete = $false
+            }
+            $streamState.StdoutTask = $streamState.StdoutReader.ReadAsync($streamState.StdoutBuffer, 0, $streamState.StdoutBuffer.Length)
+            $streamState.StderrTask = $streamState.StderrReader.ReadAsync($streamState.StderrBuffer, 0, $streamState.StderrBuffer.Length)
+            $outputPump = {
+                while (-not $streamState.StdoutComplete -and $streamState.StdoutTask.IsCompleted) {
+                    $count = $streamState.StdoutTask.GetAwaiter().GetResult()
+                    if ($count -eq 0) {
+                        $streamState.StdoutComplete = $true
+                    } else {
+                        $stdoutWriter.Write($streamState.StdoutBuffer, 0, $count)
+                        $stdoutWriter.Flush()
+                        $streamState.StdoutTask = $streamState.StdoutReader.ReadAsync($streamState.StdoutBuffer, 0, $streamState.StdoutBuffer.Length)
+                    }
+                }
+                while (-not $streamState.StderrComplete -and $streamState.StderrTask.IsCompleted) {
+                    $count = $streamState.StderrTask.GetAwaiter().GetResult()
+                    if ($count -eq 0) {
+                        $streamState.StderrComplete = $true
+                    } else {
+                        $stderrWriter.Write($streamState.StderrBuffer, 0, $count)
+                        $stderrWriter.Flush()
+                        $streamState.StderrTask = $streamState.StderrReader.ReadAsync($streamState.StderrBuffer, 0, $streamState.StderrBuffer.Length)
+                    }
+                }
+            }.GetNewClosure()
+        }
         $State.RunningProcess = $proc
+        if ($workerContext) {
+            Send-MediaNormalizerWorkerProcessEvent -Context $workerContext -Type 'process-started' -Fields @{
+                runId = $workerContext.RunId; processToken = $processToken; processId = [int]$proc.Id
+                processStartedAtUtc = $processStartedAtUtc; executablePath = $FilePath
+                parentProcessId = $PID; parentStartedAtUtc = $parentStartedAtUtc
+            }
+            Wait-MediaNormalizerWorkerProcessRegistration -Context $workerContext -RunId $workerContext.RunId `
+                -ProcessToken $processToken -ProcessId ([int]$proc.Id) -ProcessStartedAtUtc $processStartedAtUtc `
+                -State $State -PumpEvents $PumpEvents
+        }
 
         $cancelFired = $false
         $cancelAction = {
             if (-not $cancelFired -and $proc -and -not $proc.HasExited) {
-                try { & taskkill.exe /T /F /PID $proc.Id 2>&1 | Out-Null } catch { }
+                if ($useWindowsStartProcess) {
+                    try { & taskkill.exe /T /F /PID $proc.Id 2>&1 | Out-Null } catch { }
+                } else {
+                    $stopResult = Stop-MediaNormalizerProcessTree -RootProcessId $proc.Id -GracePeriodSeconds 5
+                    if (-not $stopResult.Stopped) {
+                        throw "[RECOVERY_REQUIRED] 外部process treeを停止できません。PID=$($proc.Id), remaining=$($stopResult.RemainingProcessIds -join ',')"
+                    }
+                }
                 $cancelFired = $true
             }
         }.GetNewClosure()
@@ -1232,6 +1486,7 @@ function Invoke-MediaNormalizerProcess {
             -LongRunningMessage $LongRunningMessage `
             -SlowWarnSeconds $SlowWarnSeconds `
             -CancelAction $cancelAction `
+            -OutputPump $outputPump `
             -CancellationToken $CancellationToken `
             -TrackElapsedForEta $TrackElapsedForEta `
             -TrackPhaseProgress $TrackPhaseProgress `
@@ -1245,7 +1500,34 @@ function Invoke-MediaNormalizerProcess {
             -GetNow $GetNow
 
         $proc.WaitForExit()
+        if (-not $useWindowsStartProcess) {
+            # ReadLineAsyncの完了をメインRunspaceからdrainし、別スレッド上でPowerShellを実行しない。
+            $drainDeadline = [DateTime]::UtcNow.AddSeconds(5)
+            while ((-not $streamState.StdoutComplete -or -not $streamState.StderrComplete) -and
+                [DateTime]::UtcNow -lt $drainDeadline) {
+                & $outputPump
+                if (-not $streamState.StdoutComplete -or -not $streamState.StderrComplete) {
+                    Start-Sleep -Milliseconds 10
+                }
+            }
+            if (-not $streamState.StdoutComplete -or -not $streamState.StderrComplete) {
+                $retainTemporaryLogs = $true
+                throw '[RECOVERY_REQUIRED] 子process stdout/stderr pipeが終了しませんでした。'
+            }
+            $stdoutWriter.Flush()
+            $stderrWriter.Flush()
+            $stdoutWriter.Dispose()
+            $stderrWriter.Dispose()
+            $stdoutWriter = $null
+            $stderrWriter = $null
+        }
         $exitCode = $proc.ExitCode
+        if ($workerContext) {
+            Send-MediaNormalizerWorkerProcessEvent -Context $workerContext -Type 'process-exited' -Fields @{
+                runId = $workerContext.RunId; processToken = $processToken; processId = [int]$proc.Id
+                processStartedAtUtc = $processStartedAtUtc; exitCode = [int]$exitCode
+            }
+        }
 
         $State.PhaseProgressPercent = 100.0
         if ($Progress) { & $Progress $State.ProgressCurrent $State.ProgressTotal }
@@ -1259,21 +1541,44 @@ function Invoke-MediaNormalizerProcess {
         if (-not $stdoutText) { $stdoutText = '' }
         if (-not $stderrText) { $stderrText = '' }
 
+        $reportedExitCode = $exitCode
+        if (-not $useWindowsStartProcess -and $exitCode -eq 0 -and
+            (Test-MediaNormalizerCancellationRequested -State $State -CancellationToken $CancellationToken)) {
+            # shell may return 0 after a terminated background child; preserve cancellation as non-success.
+            $reportedExitCode = 130
+        }
         return [pscustomobject]@{
-            ExitCode   = $exitCode
+            ExitCode   = $reportedExitCode
             StdoutText = $stdoutText
             StderrText = $stderrText
         }
     } finally {
-        $State.RunningProcess = $null
+        if (-not $useWindowsStartProcess -and $proc -and -not $proc.HasExited) {
+            try {
+                $stopResult = Stop-MediaNormalizerProcessTree -RootProcessId $proc.Id -GracePeriodSeconds 5
+                if ($stopResult.Stopped) { $proc.WaitForExit(5000) | Out-Null }
+                if (-not $proc.HasExited) { $retainTemporaryLogs = $true }
+            } catch {
+                $retainTemporaryLogs = $true
+            }
+        }
+        if (-not $retainTemporaryLogs) {
+            $State.RunningProcess = $null
+        }
         $State.CurrentPhase = $null
         $State.PhaseProgressPercent = -1.0
         if ($Progress) { & $Progress $State.ProgressCurrent $State.ProgressTotal }
-        if ($proc) { try { $proc.Dispose() } catch { } }
-        foreach ($tmp in @($stdoutTmp, $stderrTmp, $progressTmp)) {
-            if ($tmp -and (Test-Path -LiteralPath $tmp)) {
-                Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        if (-not $retainTemporaryLogs) {
+            if ($stdoutWriter) { try { $stdoutWriter.Dispose() } catch { } }
+            if ($stderrWriter) { try { $stderrWriter.Dispose() } catch { } }
+            if ($proc) { try { $proc.Dispose() } catch { } }
+            foreach ($tmp in @($stdoutTmp, $stderrTmp, $progressTmp)) {
+                if ($tmp -and (Test-Path -LiteralPath $tmp)) {
+                    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+                }
             }
+        } elseif ($Logger) {
+            & $Logger "[ERROR] 子process treeの停止を確認できず、一時logを保持しました: stdout=$stdoutTmp stderr=$stderrTmp"
         }
     }
 }
@@ -1291,35 +1596,42 @@ function Test-FfmpegNormalizePython {
 }
 
 function Find-FfmpegNormalize {
-    if (-not [string]::IsNullOrWhiteSpace($env:MEDIA_NORMALIZER_RUNTIME_ROOT)) {
-        $bundledPython = Join-Path $env:MEDIA_NORMALIZER_RUNTIME_ROOT 'python\python.exe'
-        if ((Test-Path -LiteralPath $bundledPython -PathType Leaf) -and
-            (Test-FfmpegNormalizePython -Command $bundledPython)) {
+    [CmdletBinding()]
+    param([ValidateSet('Windows', 'macOS', 'Linux')][string]$Platform = (Get-MediaNormalizerPlatform))
+
+    $hasPinnedPython = -not [string]::IsNullOrWhiteSpace($env:MEDIA_NORMALIZER_PYTHON) -or
+        -not [string]::IsNullOrWhiteSpace($env:MEDIA_NORMALIZER_RUNTIME_ROOT)
+    if ($hasPinnedPython) {
+        $pinnedPython = Resolve-MediaNormalizerCommand -Name Python -Platform $Platform
+        if ($pinnedPython -and (Test-FfmpegNormalizePython -Command $pinnedPython)) {
             return [pscustomobject]@{
-                Cmd  = $bundledPython
+                Cmd  = $pinnedPython
                 Args = @('-m', 'ffmpeg_normalize')
             }
         }
+        # 同梱modeまたは明示Python指定では、PATH上の別runtimeへ移らない。
+        return $null
     }
 
-    # Windows 上で Get-Command は実行可能拡張子を自動補完するため、拡張子なし候補は不要。
-    # .cmd / .bat は pip インストール時の launcher として残す。
-    $cands = @('ffmpeg-normalize.exe', 'ffmpeg-normalize.cmd', 'ffmpeg-normalize.bat')
-    foreach ($c in $cands) {
-        $cmd = Get-Command $c -ErrorAction SilentlyContinue
-        if ($cmd) {
-            return [pscustomobject]@{ Cmd = $cmd.Source; Args = @() }
+    # Windowsでは拡張子付きlauncherを維持し、POSIXではpipの拡張子なしentry pointを使う。
+    $candidates = if ($Platform -eq 'Windows') {
+        @('ffmpeg-normalize.exe', 'ffmpeg-normalize.cmd', 'ffmpeg-normalize.bat')
+    } else {
+        @('ffmpeg-normalize')
+    }
+    foreach ($candidate in $candidates) {
+        $command = Get-Command $candidate -ErrorAction SilentlyContinue
+        if ($command) {
+            return [pscustomobject]@{ Cmd = $command.Source; Args = @() }
         }
     }
 
-    $py = Get-Command py -ErrorAction SilentlyContinue
-    if ($py -and (Test-FfmpegNormalizePython -Command $py.Source)) {
-        return [pscustomobject]@{ Cmd = $py.Source; Args = @('-m', 'ffmpeg_normalize') }
-    }
-
-    $python = Get-Command python -ErrorAction SilentlyContinue
-    if ($python -and (Test-FfmpegNormalizePython -Command $python.Source)) {
-        return [pscustomobject]@{ Cmd = $python.Source; Args = @('-m', 'ffmpeg_normalize') }
+    $pythonCandidates = if ($Platform -eq 'Windows') { @('py', 'python') } else { @('python3', 'python') }
+    foreach ($candidate in $pythonCandidates) {
+        $command = Get-Command $candidate -ErrorAction SilentlyContinue
+        if ($command -and (Test-FfmpegNormalizePython -Command $command.Source)) {
+            return [pscustomobject]@{ Cmd = $command.Source; Args = @('-m', 'ffmpeg_normalize') }
+        }
     }
     return $null
 }
@@ -1471,6 +1783,216 @@ function Get-NormalizationCurrentDuration {
     return -1.0
 }
 
+function Get-MediaNormalizerRuntimePreflight {
+    [CmdletBinding()]
+    param([bool]$AnalyzeOnly, [scriptblock]$Logger)
+
+    $runtimeCheckCommand = if ((Get-MediaNormalizerPlatform) -eq 'macOS') { 'runtime-check.sh' } else { 'runtime-check.bat' }
+    $ffnorm = $null
+    if (-not $AnalyzeOnly) {
+        try {
+            $ffnorm = Find-FfmpegNormalize
+        } catch {
+            & $Logger '[ERROR] ffmpeg-normalize runtimeを確認できません。'
+            & $Logger "        $runtimeCheckCommand を実行し、同梱runtimeを確認してください。"
+            & $Logger "        $($_.Exception.Message)"
+            return [pscustomobject]@{ Available = $false; FfmpegNormalize = $null }
+        }
+    }
+    if (-not $AnalyzeOnly -and -not $ffnorm) {
+        if ($env:MEDIA_NORMALIZER_RUNTIME_ROOT) {
+            & $Logger '[ERROR] 内蔵 ffmpeg-normalize を実行できません。'
+            & $Logger "        $runtimeCheckCommand を実行し、ZIPを再展開してください。"
+        } else {
+            & $Logger '[ERROR] ffmpeg-normalize が見つからないか、Pythonモジュールを読み込めません。'
+            $installCommand = if ((Get-MediaNormalizerPlatform) -eq 'Windows') {
+                'py -m pip install --user ffmpeg-normalize'
+            } else {
+                'python3 -m pip install --user ffmpeg-normalize'
+            }
+            & $Logger "        開発環境では $installCommand を実行してください。"
+        }
+        return [pscustomobject]@{ Available = $false; FfmpegNormalize = $null }
+    }
+
+    foreach ($tool in @('FFmpeg', 'FFprobe')) {
+        try {
+            $command = Resolve-MediaNormalizerCommand -Name $tool
+        } catch {
+            & $Logger "[ERROR] $tool runtimeを確認できません: $($_.Exception.Message)"
+            & $Logger "        $runtimeCheckCommand を実行し、同梱runtimeを確認してください。"
+            return [pscustomobject]@{ Available = $false; FfmpegNormalize = $null }
+        }
+        if ($command) { continue }
+
+        if ($tool -eq 'FFmpeg') {
+            if ($env:MEDIA_NORMALIZER_RUNTIME_ROOT) {
+                & $Logger "[ERROR] 内蔵 FFmpeg を実行できません。$runtimeCheckCommand を実行してください。"
+            } else {
+                & $Logger '[ERROR] ffmpeg が見つかりません。開発環境のPATHに追加してください。'
+            }
+        } else {
+            & $Logger "[ERROR] 出力検証に必要な ffprobe が見つかりません。$runtimeCheckCommand を実行してください。"
+        }
+        return [pscustomobject]@{ Available = $false; FfmpegNormalize = $null }
+    }
+
+    return [pscustomobject]@{ Available = $true; FfmpegNormalize = $ffnorm }
+}
+
+function Send-MediaNormalizerStructuredEvent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][scriptblock]$EventSink,
+        [Parameter(Mandatory)][ValidateSet('run-start', 'file-start', 'progress', 'log', 'file-done', 'run-done', 'error', 'temporary-output')][string]$Type,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Fields
+    )
+
+    $event = [ordered]@{ schemaVersion = 1; type = $Type }
+    foreach ($key in $Fields.Keys) { $event[$key] = $Fields[$key] }
+    $null = & $EventSink ([pscustomobject]$event)
+}
+
+function Send-MediaNormalizerRunDoneEvent {
+    [CmdletBinding()]
+    param(
+        [scriptblock]$EventSink,
+        [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][hashtable]$Result,
+        [string]$ErrorMessage
+    )
+
+    if (-not $EventSink) { return }
+    if ($ErrorMessage) {
+        Send-MediaNormalizerStructuredEvent -EventSink $EventSink -Type error -Fields @{
+            runId = $RunId
+            code = 'RUN_FAILED'
+            message = $ErrorMessage
+        }
+    }
+    Send-MediaNormalizerStructuredEvent -EventSink $EventSink -Type run-done -Fields @{
+        runId = $RunId
+        success = [int]$Result.Success
+        analyzed = if ($Result.ContainsKey('Analyzed')) { [int]$Result.Analyzed } else { 0 }
+        fail = [int]$Result.Fail
+        skipped = [int]$Result.Skipped
+        cancelled = [int]$Result.Cancelled
+        reportPath = if ($Result.ContainsKey('ReportPath')) { $Result.ReportPath } else { $null }
+        reportSucceeded = if ($Result.ContainsKey('ReportSucceeded')) { [bool]$Result.ReportSucceeded } else { $null }
+    }
+}
+
+function New-MediaNormalizerEventCallbacks {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][scriptblock]$EventSink,
+        [Parameter(Mandatory)][scriptblock]$Logger,
+        [scriptblock]$Progress,
+        [Parameter(Mandatory)][pscustomobject]$State,
+        [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][pscustomobject]$FileContext
+    )
+
+    $sink = $EventSink
+    $loggerBase = $Logger
+    $logger = {
+        param($message)
+        $null = $loggerBase.Invoke($message)
+        $text = [string]$message
+        $level = if ($text -match '\[ERROR\]|\[FAIL\s*\]') { 'error' }
+            elseif ($text -match '\[WARN\s*\]') { 'warning' }
+            elseif ($text -match '\[DEBUG\]') { 'debug' }
+            else { 'info' }
+        $null = $sink.Invoke([pscustomobject]@{
+            schemaVersion = 1; type = 'log'; runId = $RunId; level = $level; message = $text
+        })
+    }.GetNewClosure()
+
+    $progressBase = $Progress
+    $progressState = $State
+    $progress = {
+        param($current, $total)
+        if ($progressBase) { $null = $progressBase.Invoke($current, $total) }
+        $percent = [double]$progressState.PhaseProgressPercent
+        if ($percent -lt 0) {
+            $percent = if ([int]$total -gt 0) { ([double]$current / [double]$total) * 100.0 } else { 0.0 }
+        }
+        $eta = $null
+        if ([double]$progressState.TotalDurationSec -gt 0) {
+            $eta = [math]::Max(0.0, [double]$progressState.TotalDurationSec -
+                [double]$progressState.ProcessedDurationSec - [double]$progressState.CurrentFileElapsedSec)
+        }
+        $phase = if ([string]::IsNullOrWhiteSpace([string]$progressState.CurrentPhase)) { 'overall' } else { [string]$progressState.CurrentPhase }
+        $null = $sink.Invoke([pscustomobject]@{
+            schemaVersion = 1; type = 'progress'; runId = $RunId
+            percent = [math]::Max(0.0, [math]::Min(100.0, $percent)); phase = $phase
+            eta = $eta; inputPath = $FileContext.InputPath
+        })
+    }.GetNewClosure()
+
+    return @{ Logger = $logger; Progress = $progress; FileContext = $FileContext }
+}
+
+function Send-MediaNormalizerFileStartEvent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][scriptblock]$EventSink,
+        [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][System.IO.FileInfo]$File,
+        [Parameter(Mandatory)][int]$Index,
+        [Parameter(Mandatory)][int]$Total
+    )
+
+    Send-MediaNormalizerStructuredEvent -EventSink $EventSink -Type file-start -Fields @{
+        runId = $RunId; fileIndex = $Index; total = $Total; inputPath = $File.FullName
+    }
+}
+
+function Send-MediaNormalizerFileDoneEvent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][scriptblock]$EventSink,
+        [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][string]$InputPath,
+        [AllowNull()][object]$OutputPath,
+        [Parameter(Mandatory)][ValidateSet('normalized', 'analyzed', 'skipped', 'failed', 'cancelled')][string]$Status,
+        [object]$Measurements,
+        [AllowNull()][object]$Message
+    )
+
+    Send-MediaNormalizerStructuredEvent -EventSink $EventSink -Type file-done -Fields @{
+        runId = $RunId; inputPath = $InputPath; outputPath = $OutputPath
+        status = $Status; measurements = $Measurements; message = $Message
+    }
+}
+
+function Send-MediaNormalizerFileErrorEvent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][scriptblock]$EventSink,
+        [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][string]$InputPath,
+        [Parameter(Mandatory)][string]$Message
+    )
+
+    Send-MediaNormalizerStructuredEvent -EventSink $EventSink -Type error -Fields @{
+        runId = $RunId; code = 'FILE_PROCESSING_FAILED'; inputPath = $InputPath; message = $Message
+    }
+}
+
+function Complete-MediaNormalizerRunEarly {
+    [CmdletBinding()]
+    param(
+        [scriptblock]$EventSink,
+        [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][hashtable]$Result
+    )
+
+    $errorMessage = if ([int]$Result.Fail -gt 0) { 'Input validation, runtime preflight, or output setup failed.' } else { $null }
+    Send-MediaNormalizerRunDoneEvent -EventSink $EventSink -RunId $RunId -Result $Result -ErrorMessage $errorMessage
+    return $Result
+}
+
 function Invoke-Normalize {
     [CmdletBinding()]
     param(
@@ -1501,18 +2023,30 @@ function Invoke-Normalize {
         [string]$ReportPath,
         [ValidateSet('audio', 'video', 'both')][string]$ReportMode,
         [scriptblock]$Analyzer,
+        [scriptblock]$EventSink,
+        [string]$RunId = ([guid]::NewGuid().ToString('D')),
         [switch]$CliMode,
         [System.Threading.CancellationToken]$CancellationToken = [System.Threading.CancellationToken]::None
     )
 
     if (-not $Logger) { $Logger = { param($m) Write-Host $m } }
 
+    $activeFileContext = [pscustomobject]@{ InputPath = $null }
+    if ($EventSink) {
+        $callbacks = New-MediaNormalizerEventCallbacks -EventSink $EventSink -Logger $Logger `
+            -Progress $Progress -State $State -RunId $RunId -FileContext $activeFileContext
+        $Logger = $callbacks.Logger
+        $Progress = $callbacks.Progress
+        $activeFileContext = $callbacks.FileContext
+        Send-MediaNormalizerStructuredEvent -EventSink $EventSink -Type run-start -Fields @{ runId = $RunId; mode = $Mode }
+    }
+
     $loudnessRangeCheck = Test-LoudnessParameter -Target $Target -TruePeak $TruePeak
     if (-not $loudnessRangeCheck.IsValid) {
         foreach ($rangeError in $loudnessRangeCheck.Errors) {
             & $Logger "[ERROR] $rangeError"
         }
-        return @{ Success = 0; Fail = 1; Cancelled = 0; Skipped = 0 }
+        return (Complete-MediaNormalizerRunEarly $EventSink $RunId @{ Success = 0; Fail = 1; Cancelled = 0; Skipped = 0 })
     }
 
     if ($Mode -eq 'audio') {
@@ -1525,41 +2059,23 @@ function Invoke-Normalize {
     if ([string]::IsNullOrWhiteSpace($InputDir) -and
         (-not $InputPaths -or $InputPaths.Count -eq 0)) {
         & $Logger '[ERROR] 入力ファイル/フォルダパスが空です。'
-        return @{ Success = 0; Fail = 1; Cancelled = 0; Skipped = 0 }
+        return (Complete-MediaNormalizerRunEarly $EventSink $RunId @{ Success = 0; Fail = 1; Cancelled = 0; Skipped = 0 })
     }
     if ((-not $InputPaths -or $InputPaths.Count -eq 0) -and
         -not (Test-Path -LiteralPath $InputDir)) {
         & $Logger "[ERROR] 入力ファイル/フォルダが見つかりません: $InputDir"
-        return @{ Success = 0; Fail = 1; Cancelled = 0; Skipped = 0 }
+        return (Complete-MediaNormalizerRunEarly $EventSink $RunId @{ Success = 0; Fail = 1; Cancelled = 0; Skipped = 0 })
     }
     if ([string]::IsNullOrWhiteSpace($OutputDir)) {
         & $Logger '[ERROR] 出力フォルダパスが空です。'
-        return @{ Success = 0; Fail = 1; Cancelled = 0; Skipped = 0 }
+        return (Complete-MediaNormalizerRunEarly $EventSink $RunId @{ Success = 0; Fail = 1; Cancelled = 0; Skipped = 0 })
     }
 
-    $ffnorm = if ($AnalyzeOnly) { $null } else { Find-FfmpegNormalize }
-    if (-not $AnalyzeOnly -and -not $ffnorm) {
-        if ($env:MEDIA_NORMALIZER_RUNTIME_ROOT) {
-            & $Logger '[ERROR] 内蔵 ffmpeg-normalize を実行できません。'
-            & $Logger '        runtime-check.bat を実行し、ZIPを再展開してください。'
-        } else {
-            & $Logger '[ERROR] ffmpeg-normalize が見つからないか、Pythonモジュールを読み込めません。'
-            & $Logger '        開発環境では py -m pip install --user ffmpeg-normalize を実行してください。'
-        }
-        return @{ Success = 0; Fail = 1; Cancelled = 0; Skipped = 0 }
+    $preflight = Get-MediaNormalizerRuntimePreflight -AnalyzeOnly:$AnalyzeOnly -Logger $Logger
+    if (-not $preflight.Available) {
+        return (Complete-MediaNormalizerRunEarly $EventSink $RunId @{ Success = 0; Fail = 1; Cancelled = 0; Skipped = 0 })
     }
-    if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
-        if ($env:MEDIA_NORMALIZER_RUNTIME_ROOT) {
-            & $Logger '[ERROR] 内蔵 FFmpeg を実行できません。runtime-check.bat を実行してください。'
-        } else {
-            & $Logger '[ERROR] ffmpeg が見つかりません。開発環境のPATHに追加してください。'
-        }
-        return @{ Success = 0; Fail = 1; Cancelled = 0; Skipped = 0 }
-    }
-    if (-not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
-        & $Logger '[ERROR] 出力検証に必要な ffprobe が見つかりません。runtime-check.bat を実行してください。'
-        return @{ Success = 0; Fail = 1; Cancelled = 0; Skipped = 0 }
-    }
+    $ffnorm = $preflight.FfmpegNormalize
 
     if (-not (Test-Path -LiteralPath $OutputDir)) {
         try {
@@ -1568,7 +2084,7 @@ function Invoke-Normalize {
         } catch {
             & $Logger "[ERROR] 出力フォルダを作成できません: $OutputDir"
             & $Logger "        $($_.Exception.Message)"
-            return @{ Success = 0; Fail = 1; Cancelled = 0; Skipped = 0 }
+            return (Complete-MediaNormalizerRunEarly $EventSink $RunId @{ Success = 0; Fail = 1; Cancelled = 0; Skipped = 0 })
         }
     }
     if ([string]::IsNullOrWhiteSpace($ReportPath)) {
@@ -1596,7 +2112,7 @@ function Invoke-Normalize {
         } else {
             & $Logger '[INFO ] 対象の動画ファイルが見つかりません。'
         }
-        return @{ Success = 0; Fail = 0; Cancelled = 0; Skipped = 0 }
+        return (Complete-MediaNormalizerRunEarly $EventSink $RunId @{ Success = 0; Fail = 0; Cancelled = 0; Skipped = 0 })
     }
 
     & $Logger "[INFO ] 入力 : $InputDir"
@@ -1616,10 +2132,18 @@ function Invoke-Normalize {
     $ok = 0; $fail = 0; $cancelled = 0; $skipped = 0; $analyzed = 0
     $reportSucceeded = $true
     $reportError = $null
+    $fileIndex = 0
     foreach ($f in $files) {
+        $fileIndex++
+        $activeFileContext.InputPath = $f.FullName
+        if ($EventSink) { Send-MediaNormalizerFileStartEvent -EventSink $EventSink -RunId $RunId -File $f -Index $fileIndex -Total $files.Count }
         if (Test-MediaNormalizerCancellationRequested -State $State -CancellationToken $CancellationToken) {
             & $Logger "[CANCEL] $($f.Name) -- ユーザー要求によりスキップ"
             $cancelled++
+            if ($EventSink) {
+                Send-MediaNormalizerFileDoneEvent -EventSink $EventSink -RunId $RunId -InputPath $f.FullName `
+                    -Status 'cancelled' -Message 'User cancellation requested before file processing.'
+            }
             continue
         }
 
@@ -1719,7 +2243,8 @@ function Invoke-Normalize {
                     $skipped++
                     & $Logger "  [SKIP  ] $($record.reason)"
                 } else {
-                    $workingOutPath = New-SafeOutputPath -FinalPath $expectedOutPath
+                    $workingOutPath = New-SafeOutputPath -FinalPath $expectedOutPath -RunId $RunId
+                    Register-NormalizationTemporaryOutputIfSupported $State $RunId $f.FullName $workingOutPath $expectedOutPath primary $PumpEvents
                     if (-not $inputInventory) {
                         $inputInventory = Get-MediaInventory -FilePath $f.FullName `
                             -State $State -Logger $Logger -Progress $Progress -PumpEvents $PumpEvents -CliMode:$CliMode `
@@ -1773,7 +2298,8 @@ function Invoke-Normalize {
                             }
                             $speedTempExt = $intermediateProfile.ContainerExtension
                             $speedTemp = Join-Path ([IO.Path]::GetTempPath()) (
-                                "media-normalizer-speed-$([guid]::NewGuid().ToString('N'))$speedTempExt")
+                                "media-normalizer-$RunId-speed-$([guid]::NewGuid().ToString('N'))$speedTempExt")
+                            Register-NormalizationTemporaryOutputIfSupported $State $RunId $f.FullName $speedTemp $expectedOutPath speed $PumpEvents
                             $speedArgs = New-FfmpegSpeedArguments `
                                 -Mode $Mode `
                                 -InputPath $f.FullName `
@@ -1782,7 +2308,7 @@ function Invoke-Normalize {
                                 -IntermediateProfile $intermediateProfile
                             & $Logger "  [CMD] ffmpeg $(ConvertTo-DisplayCommandArguments -Arguments $speedArgs)"
                             $speedResult = Invoke-MediaNormalizerProcess `
-                                -FilePath 'ffmpeg' `
+                                -FilePath (Resolve-MediaNormalizerExecutable -Name FFmpeg) `
                                 -Arguments $speedArgs `
                                 -State $State `
                                 -PhaseLabel '速度変更中' `
@@ -1899,6 +2425,7 @@ function Invoke-Normalize {
             } else {
                 $record.action = 'failed'
                 & $Logger "[FAIL  ] $($f.Name) -- $($_.Exception.Message)"
+                if ($EventSink) { Send-MediaNormalizerFileErrorEvent -EventSink $EventSink -RunId $RunId -InputPath $f.FullName -Message $_.Exception.Message }
                 $fail++
             }
         } finally {
@@ -1913,6 +2440,12 @@ function Invoke-Normalize {
             $State.ReportRecords.Add([pscustomobject]$record)
         }
 
+        if ($EventSink) {
+            Send-MediaNormalizerFileDoneEvent -EventSink $EventSink -RunId $RunId -InputPath $f.FullName `
+                -OutputPath $record.outputPath -Status $record.action `
+                -Measurements @{ before = $record.before; after = $record.after } -Message $record.error
+        }
+        $activeFileContext.InputPath = $null
         $State.CurrentFileElapsedSec = 0.0
         if ($State.DurationMap.ContainsKey($f.FullName)) {
             $fileDur = $State.DurationMap[$f.FullName]
@@ -1967,7 +2500,7 @@ function Invoke-Normalize {
         & $Logger "[WARN ] レポートの保存に失敗しました: $($_.Exception.Message)"
     }
 
-    return @{
+    $finalResult = @{
         Success   = $ok
         Analyzed  = $analyzed
         Fail      = $fail
@@ -1977,6 +2510,8 @@ function Invoke-Normalize {
         ReportSucceeded = $reportSucceeded
         ReportError = $reportError
     }
+    Send-MediaNormalizerRunDoneEvent -EventSink $EventSink -RunId $RunId -Result $finalResult
+    return $finalResult
 }
 
 function Invoke-NormalizeCli {
@@ -2150,13 +2685,21 @@ function Invoke-NormalizeCli {
         else { $cliExitCode = 0 }
     } catch {
         Write-Error $_
-        $cliExitCode = 2
+        $cliExitCode = if ([string]$_.Exception.Message -match '\[RECOVERY_REQUIRED\]') { 4 } else { 2 }
     } finally {
         if ($handler) {
             [Console]::remove_CancelKeyPress($handler)
         }
         if ($state -and $state.RunningProcess -and -not $state.RunningProcess.HasExited) {
-            & taskkill.exe /T /F /PID $state.RunningProcess.Id 2>&1 | Out-Null
+            if ((Get-MediaNormalizerPlatform) -eq 'Windows') {
+                & taskkill.exe /T /F /PID $state.RunningProcess.Id 2>&1 | Out-Null
+            } else {
+                $stopResult = Stop-MediaNormalizerProcessTree -RootProcessId $state.RunningProcess.Id -GracePeriodSeconds 5
+                if (-not $stopResult.Stopped) {
+                    Write-Error "[RECOVERY_REQUIRED] 外部process treeを停止できません: $($stopResult.RemainingProcessIds -join ',')"
+                    $cliExitCode = 4
+                }
+            }
         }
         if ($state) {
             $state.ReservedOutPaths.Clear()

@@ -21,23 +21,36 @@ param(
 )
 
 $moduleRoot = Join-Path $PSScriptRoot 'lib'
+Import-Module (Join-Path $moduleRoot 'MediaNormalizer.Platform.psm1') -Force -DisableNameChecking
 Import-Module (Join-Path $moduleRoot 'MediaNormalizer.Probe.psm1') -Force
 Import-Module (Join-Path $moduleRoot 'MediaNormalizer.Progress.psm1') -Force
 Import-Module (Join-Path $moduleRoot 'MediaNormalizer.Core.psm1') -Force
 
+# 同梱modeでは子processとThreadJobへ固定runtimeの実体pathを渡す。
+if (-not [string]::IsNullOrWhiteSpace($env:MEDIA_NORMALIZER_RUNTIME_ROOT)) {
+    $env:FFMPEG_PATH = Resolve-MediaNormalizerCommand -Name FFmpeg
+    $env:FFPROBE_PATH = Resolve-MediaNormalizerCommand -Name FFprobe
+    $env:MEDIA_NORMALIZER_PYTHON = Resolve-MediaNormalizerCommand -Name Python
+}
+
 # Installer が launcher 強制終了後も実行中の PowerShell 本体を検出できるよう、
 # プロセス存続中は専用ファイルを排他的に開く。存在ではなくハンドル競合を使う。
-$runningLockPath = Join-Path $PSScriptRoot '.media-normalizer-running.lock'
-try {
-    $script:MediaNormalizerRunningLock = [IO.File]::Open(
-        $runningLockPath,
-        [IO.FileMode]::OpenOrCreate,
-        [IO.FileAccess]::ReadWrite,
-        [IO.FileShare]::None)
-}
-catch [IO.IOException] {
-    Write-Error 'Media Normalizer は既に起動しています。'
-    exit 2
+$script:MediaNormalizerRunningLock = $null
+$script:MediaNormalizerCliRun = $null
+$mediaNormalizerPlatform = Get-MediaNormalizerPlatform
+if ($mediaNormalizerPlatform -eq 'Windows') {
+    $runningLockPath = Join-Path $PSScriptRoot '.media-normalizer-running.lock'
+    try {
+        $script:MediaNormalizerRunningLock = [IO.File]::Open(
+            $runningLockPath,
+            [IO.FileMode]::OpenOrCreate,
+            [IO.FileAccess]::ReadWrite,
+            [IO.FileShare]::None)
+    }
+    catch [IO.IOException] {
+        Write-Error 'Media Normalizer は既に起動しています。'
+        exit 2
+    }
 }
 
 if ($Cli) {
@@ -57,6 +70,20 @@ if ($Cli) {
         Write-Host '  media-normalizer.ps1 -Cli -InputPath "C:\media\in" -OutputDir "C:\media\out" -Mode both -Preset "デフォルト" -AudioOutputFormat flac'
         Write-Host '  media-normalizer.ps1 -Cli -InputFile "C:\media\sample.wav" -OutputDir "C:\media\report" -AnalyzeOnly'
         exit 2
+    }
+
+    if ($mediaNormalizerPlatform -eq 'macOS') {
+        Import-Module (Join-Path $moduleRoot 'MediaNormalizer.RunRecovery.psm1') -Force -DisableNameChecking
+        $storageRoot = Split-Path -Parent (Get-MediaNormalizerStoragePath -Kind Settings)
+        try {
+            $script:MediaNormalizerCliRun = Enter-MediaNormalizerCliRun -StorageRoot $storageRoot
+        } catch {
+            $message = [string]$_.Exception.Message
+            Write-Error $message
+            if ($message -match '^\[JOB_ALREADY_RUNNING\]') { exit 3 }
+            if ($message -match '^\[RECOVERY_REQUIRED\]') { exit 4 }
+            exit 2
+        }
     }
 
     $cliParams = @{}
@@ -80,6 +107,15 @@ if ($Cli) {
         }
     }
     Invoke-NormalizeCli @cliParams
+    if ($script:MediaNormalizerCliRun) {
+        try {
+            Complete-MediaNormalizerCliRun -Run $script:MediaNormalizerCliRun -ExitCode $LASTEXITCODE `
+                -RecoveryRequired:($LASTEXITCODE -eq 4) | Out-Null
+        } catch {
+            Write-Error "[RECOVERY_REQUIRED] CLI run記録を確定できません: $($_.Exception.Message)"
+            exit 4
+        }
+    }
     exit $LASTEXITCODE
 }
 

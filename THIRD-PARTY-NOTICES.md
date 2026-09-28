@@ -40,3 +40,11 @@ Package license files are retained inside the corresponding `.dist-info`
 directories under `runtime/python/Lib/site-packages/`.
 
 This notice is an engineering inventory, not legal advice.
+
+## macOS arm64 runtime pins
+
+- FFmpeg and ffprobe 8.1.2 — Martin Riedl macOS arm64 build; GPL-3.0-or-later. The measured archive URLs and SHA-256 values are in `portable-dependencies.json`. The build configuration enables GPL and version 3 components, including libx264. Any future transfer of these binaries to another person requires a separate review of the corresponding-source and notice terms.
+- Python 3.13.15 — python-build-standalone release 20260924; PSF-2.0. Keep the archive license and notices with the full runtime tree.
+- PowerShell 7.6.6 — Microsoft official macOS arm64 binary archive; MIT. Keep `LICENSE.txt` and `ThirdPartyNotices.txt` from the full archive with the runtime.
+
+The six locked Python wheels retain their existing versions, hashes, and license inventory above. Ad-hoc signing changes the Mach-O bytes and does not replace upstream license notices or imply Apple Developer ID signing or notarization.

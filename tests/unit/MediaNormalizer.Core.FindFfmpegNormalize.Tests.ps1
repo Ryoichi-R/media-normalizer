@@ -21,7 +21,7 @@ Describe 'Find-FfmpegNormalize' {
                 }
                 return $null
             }
-            $r = Find-FfmpegNormalize
+            $r = Find-FfmpegNormalize -Platform Windows
             $r | Should -Not -BeNullOrEmpty
             $r.Cmd | Should -Be 'C:\fake\ffmpeg-normalize.exe'
             ,$r.Args | Should -BeOfType ([object[]])
@@ -36,7 +36,7 @@ Describe 'Find-FfmpegNormalize' {
                 }
                 return $null
             }
-            $r = Find-FfmpegNormalize
+            $r = Find-FfmpegNormalize -Platform Windows
             $r.Cmd | Should -Be 'C:\fake\ffmpeg-normalize.cmd'
             $r.Args.Count | Should -Be 0
         }
@@ -49,7 +49,7 @@ Describe 'Find-FfmpegNormalize' {
                 }
                 return $null
             }
-            $r = Find-FfmpegNormalize
+            $r = Find-FfmpegNormalize -Platform Windows
             $r.Cmd | Should -Be 'C:\fake\ffmpeg-normalize.bat'
             $r.Args.Count | Should -Be 0
         }
@@ -68,7 +68,7 @@ Describe 'Find-FfmpegNormalize' {
                 }
                 return $null
             }
-            $r = Find-FfmpegNormalize
+            $r = Find-FfmpegNormalize -Platform Windows
             $r.Cmd | Should -Be 'C:\fake\py.exe'
             $r.Args.Count | Should -Be 2
             $r.Args[0] | Should -Be '-m'
@@ -83,7 +83,7 @@ Describe 'Find-FfmpegNormalize' {
                 }
                 return $null
             }
-            $r = Find-FfmpegNormalize
+            $r = Find-FfmpegNormalize -Platform Windows
             $r.Cmd | Should -Be 'C:\fake\python.exe'
             $r.Args.Count | Should -Be 2
             $r.Args[0] | Should -Be '-m'
@@ -101,7 +101,7 @@ Describe 'Find-FfmpegNormalize' {
                 }
                 return $null
             }
-            $r = Find-FfmpegNormalize
+            $r = Find-FfmpegNormalize -Platform Windows
             $r.Cmd | Should -Be 'C:\fake\ffmpeg-normalize.exe'
             $r.Args.Count | Should -Be 0
         }
@@ -117,7 +117,7 @@ Describe 'Find-FfmpegNormalize' {
                 }
                 return $null
             }
-            $r = Find-FfmpegNormalize
+            $r = Find-FfmpegNormalize -Platform Windows
             $r.Cmd | Should -Be 'C:\fake\py.exe'
             $r.Args[1] | Should -Be 'ffmpeg_normalize'
         }
@@ -132,27 +132,50 @@ Describe 'Find-FfmpegNormalize' {
             }
             Mock -ModuleName MediaNormalizer.Core Test-FfmpegNormalizePython { $false }
 
-            Find-FfmpegNormalize | Should -BeNullOrEmpty
+            Find-FfmpegNormalize -Platform Windows | Should -BeNullOrEmpty
         }
     }
 
     Context 'ポータブルランタイム' {
         It '内蔵Pythonをシステム上の候補より優先する' {
             $oldRuntimeRoot = $env:MEDIA_NORMALIZER_RUNTIME_ROOT
+            $oldPythonPath = $env:MEDIA_NORMALIZER_PYTHON
+            $runtimeRoot = Join-Path ([IO.Path]::GetTempPath()) ("mn-bundled-python-" + [guid]::NewGuid().ToString('N'))
+            $pythonPath = Join-Path $runtimeRoot 'python/bin/python3'
             try {
-                $env:MEDIA_NORMALIZER_RUNTIME_ROOT = 'C:\portable\runtime'
-                Mock -ModuleName MediaNormalizer.Core Test-Path { $true }
+                New-Item -ItemType Directory -Path (Split-Path -Parent $pythonPath) -Force | Out-Null
+                [IO.File]::WriteAllText($pythonPath, '# bundled python fixture')
+                $env:MEDIA_NORMALIZER_RUNTIME_ROOT = $runtimeRoot
+                Remove-Item Env:MEDIA_NORMALIZER_PYTHON -ErrorAction SilentlyContinue
                 Mock -ModuleName MediaNormalizer.Core Test-FfmpegNormalizePython { $true }
                 Mock -ModuleName MediaNormalizer.Core Get-Command {
-                    return [pscustomobject]@{ Source = 'C:\system\ffmpeg-normalize.exe' }
+                    return [pscustomobject]@{ Source = '/system/ffmpeg-normalize' }
                 }
 
-                $r = Find-FfmpegNormalize
-                $r.Cmd | Should -Be 'C:\portable\runtime\python\python.exe'
+                $r = Find-FfmpegNormalize -Platform macOS
+                $r.Cmd | Should -Be $pythonPath
                 $r.Args | Should -Be @('-m', 'ffmpeg_normalize')
             }
             finally {
-                $env:MEDIA_NORMALIZER_RUNTIME_ROOT = $oldRuntimeRoot
+                if ($null -eq $oldRuntimeRoot) { Remove-Item Env:MEDIA_NORMALIZER_RUNTIME_ROOT -ErrorAction SilentlyContinue } else { $env:MEDIA_NORMALIZER_RUNTIME_ROOT = $oldRuntimeRoot }
+                if ($null -eq $oldPythonPath) { Remove-Item Env:MEDIA_NORMALIZER_PYTHON -ErrorAction SilentlyContinue } else { $env:MEDIA_NORMALIZER_PYTHON = $oldPythonPath }
+                Remove-Item -LiteralPath $runtimeRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+
+        It '同梱pythonが欠落またはimportできなければPATHへfallbackしない' {
+            $oldRuntimeRoot = $env:MEDIA_NORMALIZER_RUNTIME_ROOT
+            $oldPythonPath = $env:MEDIA_NORMALIZER_PYTHON
+            $runtimeRoot = Join-Path ([IO.Path]::GetTempPath()) ("mn-missing-python-" + [guid]::NewGuid().ToString('N'))
+            try {
+                $env:MEDIA_NORMALIZER_RUNTIME_ROOT = $runtimeRoot
+                Remove-Item Env:MEDIA_NORMALIZER_PYTHON -ErrorAction SilentlyContinue
+                Mock -ModuleName MediaNormalizer.Core Get-Command { return [pscustomobject]@{ Source = '/system/ffmpeg-normalize' } }
+                { Find-FfmpegNormalize -Platform macOS } | Should -Throw '*PATH上の別実体へfallbackしません*'
+            } finally {
+                if ($null -eq $oldRuntimeRoot) { Remove-Item Env:MEDIA_NORMALIZER_RUNTIME_ROOT -ErrorAction SilentlyContinue } else { $env:MEDIA_NORMALIZER_RUNTIME_ROOT = $oldRuntimeRoot }
+                if ($null -eq $oldPythonPath) { Remove-Item Env:MEDIA_NORMALIZER_PYTHON -ErrorAction SilentlyContinue } else { $env:MEDIA_NORMALIZER_PYTHON = $oldPythonPath }
+                Remove-Item -LiteralPath $runtimeRoot -Recurse -Force -ErrorAction SilentlyContinue
             }
         }
     }
@@ -160,25 +183,24 @@ Describe 'Find-FfmpegNormalize' {
     Context '一切見つからない場合' {
         It '$null を返す' {
             Mock -ModuleName MediaNormalizer.Core Get-Command { return $null }
-            $r = Find-FfmpegNormalize
+            $r = Find-FfmpegNormalize -Platform Windows
             $r | Should -BeNullOrEmpty
         }
     }
 
-    Context '候補リストの整理（P2-6: 拡張子なし候補の削除）' {
-        It '拡張子なし ffmpeg-normalize（Linux 形式）は探索対象外で、結果に影響しない' {
-            # P2-6 で `'ffmpeg-normalize'`（拡張子なし）が候補から削除されたことを固定化する。
-            # 拡張子なしを引数に与えても、.exe/.cmd/.bat/py/python 経路で見つけられる関数になる。
+    Context 'POSIX launcher' {
+        It '拡張子なし ffmpeg-normalize entry pointを探索する' {
             Mock -ModuleName MediaNormalizer.Core Get-Command {
                 param($Name)
                 if ($Name -eq 'ffmpeg-normalize') {
-                    return [pscustomobject]@{ Source = 'C:\fake\ffmpeg-normalize' }
+                    return [pscustomobject]@{ Source = '/portable/bin/ffmpeg-normalize' }
                 }
                 return $null
             }
-            $r = Find-FfmpegNormalize
-            # 拡張子なしは候補ではないため、結果は $null
-            $r | Should -BeNullOrEmpty
+            $r = Find-FfmpegNormalize -Platform macOS
+            $r.Cmd | Should -Be '/portable/bin/ffmpeg-normalize'
+            $r.Args.Count | Should -Be 0
         }
     }
+
 }

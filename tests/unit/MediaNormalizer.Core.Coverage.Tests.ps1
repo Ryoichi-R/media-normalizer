@@ -1,4 +1,4 @@
-#Requires -Modules Pester
+﻿#Requires -Modules Pester
 
 Set-StrictMode -Version Latest
 
@@ -6,6 +6,23 @@ BeforeAll {
     $script:libRoot = [IO.Path]::Combine($PSScriptRoot, '..', '..', 'lib')
     Import-Module ([IO.Path]::Combine($script:libRoot, 'MediaNormalizer.Core.psm1')) -Force
     Import-Module ([IO.Path]::Combine($script:libRoot, 'MediaNormalizer.Probe.psm1')) -Force
+    $script:oldFfmpegOverride = [Environment]::GetEnvironmentVariable('FFMPEG_PATH')
+    $script:oldFfprobeOverride = [Environment]::GetEnvironmentVariable('FFPROBE_PATH')
+    $script:useFakeMediaTools = [Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT
+    if ($script:useFakeMediaTools) {
+        # Analyze-only orchestration uses mocked analyzers; /bin/true satisfies tool preflight without media work.
+        $env:FFMPEG_PATH = '/usr/bin/true'
+        $env:FFPROBE_PATH = '/usr/bin/true'
+    }
+}
+
+AfterAll {
+    if ($script:useFakeMediaTools) {
+        if ($null -eq $script:oldFfmpegOverride) { Remove-Item Env:FFMPEG_PATH -ErrorAction SilentlyContinue }
+        else { $env:FFMPEG_PATH = $script:oldFfmpegOverride }
+        if ($null -eq $script:oldFfprobeOverride) { Remove-Item Env:FFPROBE_PATH -ErrorAction SilentlyContinue }
+        else { $env:FFPROBE_PATH = $script:oldFfprobeOverride }
+    }
 }
 
 Describe 'MediaNormalizer.Core coverage contracts' {
@@ -103,6 +120,7 @@ Describe 'MediaNormalizer.Core coverage contracts' {
 
     It 'runs analyze-only through the full normalize orchestration without external encoders' {
         InModuleScope MediaNormalizer.Core {
+            Mock -ModuleName MediaNormalizer.Platform Get-Command { param($Name) [pscustomobject]@{ Source = $Name } }
             $tmp = Join-Path ([IO.Path]::GetTempPath()) ('mn-core-analyze-' + [guid]::NewGuid().ToString('N'))
             New-Item -ItemType Directory -Path $tmp -Force | Out-Null
             try {
@@ -152,8 +170,11 @@ Describe 'MediaNormalizer.Core coverage contracts' {
 
     It 'covers normalize preflight failures and empty-input paths' {
         InModuleScope MediaNormalizer.Core {
+            Mock -ModuleName MediaNormalizer.Platform Get-Command { param($Name) [pscustomobject]@{ Source = $Name } }
             $tmp = Join-Path ([IO.Path]::GetTempPath()) ('mn-core-preflight-' + [guid]::NewGuid().ToString('N'))
             New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+            $testFfmpegPath = $env:FFMPEG_PATH
+            $testFfprobePath = $env:FFPROBE_PATH
             try {
                 $base = @{
                     State = (New-MediaNormalizerState)
@@ -181,22 +202,27 @@ Describe 'MediaNormalizer.Core coverage contracts' {
                 $missingNormalize.Fail | Should -Be 1
 
                 Mock Find-FfmpegNormalize { 'ffmpeg-normalize' }
-                Mock Get-Command {
+                $env:FFMPEG_PATH = Join-Path $tmp 'missing-ffmpeg'
+                Mock -ModuleName MediaNormalizer.Platform Get-Command {
                     param($Name)
                     if ($Name -eq 'ffmpeg') { return $null }
-                    [pscustomobject]@{ Name = $Name }
+                    [pscustomobject]@{ Source = $Name }
                 }
                 $missingFfmpeg = Invoke-Normalize @base -AnalyzeOnly:$false
                 $missingFfmpeg.Fail | Should -Be 1
 
-                Mock Get-Command {
+                $env:FFMPEG_PATH = $testFfmpegPath
+                $env:FFPROBE_PATH = Join-Path $tmp 'missing-ffprobe'
+                Mock -ModuleName MediaNormalizer.Platform Get-Command {
                     param($Name)
                     if ($Name -eq 'ffprobe') { return $null }
-                    [pscustomobject]@{ Name = $Name }
+                    [pscustomobject]@{ Source = $Name }
                 }
                 $missingFfprobe = Invoke-Normalize @base -AnalyzeOnly:$false
                 $missingFfprobe.Fail | Should -Be 1
             } finally {
+                $env:FFMPEG_PATH = $testFfmpegPath
+                $env:FFPROBE_PATH = $testFfprobePath
                 Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
             }
         }
@@ -204,6 +230,7 @@ Describe 'MediaNormalizer.Core coverage contracts' {
 
     It 'covers normalize input/output validation and filtered target branches' {
         InModuleScope MediaNormalizer.Core {
+            Mock -ModuleName MediaNormalizer.Platform Get-Command { param($Name) [pscustomobject]@{ Source = $Name } }
             $tmp = Join-Path ([IO.Path]::GetTempPath()) ('mn-core-input-branches-' + [guid]::NewGuid().ToString('N'))
             New-Item -ItemType Directory -Path $tmp -Force | Out-Null
             try {
@@ -252,6 +279,7 @@ Describe 'MediaNormalizer.Core coverage contracts' {
 
     It 'covers cancellation, collision skip, copy, and normalize failure paths' {
         InModuleScope MediaNormalizer.Core {
+            Mock -ModuleName MediaNormalizer.Platform Get-Command { param($Name) [pscustomobject]@{ Source = $Name } }
             $tmp = Join-Path ([IO.Path]::GetTempPath()) ('mn-core-branches-' + [guid]::NewGuid().ToString('N'))
             New-Item -ItemType Directory -Path $tmp -Force | Out-Null
             try {
@@ -273,9 +301,9 @@ Describe 'MediaNormalizer.Core coverage contracts' {
                 }
                 $integrity = [pscustomobject]@{ IsValid = $true; Warnings = @(); Errors = @(); DroppedAudioStreams = 0 }
                 Mock Find-FfmpegNormalize { [pscustomobject]@{ Cmd = 'ffmpeg-normalize'; Args = @() } }
-                Mock Get-Command {
+                Mock -ModuleName MediaNormalizer.Platform Get-Command {
                     param($Name)
-                    [pscustomobject]@{ Name = $Name }
+                    [pscustomobject]@{ Source = $Name }
                 }
                 Mock Get-MediaInventory { $inventory }
                 Mock Compare-MediaInventory { $integrity }
@@ -331,6 +359,7 @@ Describe 'MediaNormalizer.Core coverage contracts' {
 
     It 'runs the CLI orchestration successfully for an empty analyze-only folder' {
         InModuleScope MediaNormalizer.Core {
+            Mock -ModuleName MediaNormalizer.Platform Get-Command { param($Name) [pscustomobject]@{ Source = $Name } }
             $tmp = Join-Path ([IO.Path]::GetTempPath()) ('mn-core-cli-' + [guid]::NewGuid().ToString('N'))
             New-Item -ItemType Directory -Path $tmp -Force | Out-Null
             try {
@@ -378,6 +407,31 @@ Describe 'MediaNormalizer.Core coverage contracts' {
                 $global:LASTEXITCODE = 99
                 Invoke-NormalizeCli -InputDir (Join-Path $tmp 'missing') -OutputDir $tmp -Preset 'デフォルト' -Mode audio -ErrorAction SilentlyContinue
                 $global:LASTEXITCODE | Should -Be 2
+            } finally {
+                Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    It 'includes dot-prefixed POSIX staging files in media inventory' -Tag 'PosixOnly' -Skip:$IsWindows {
+        InModuleScope MediaNormalizer.Core {
+            $tmp = Join-Path ([IO.Path]::GetTempPath()) ('mn-core-hidden-stage-' + [guid]::NewGuid().ToString('N'))
+            New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+            try {
+                $mediaPath = Join-Path $tmp '.normalized-stage.mkv'
+                Set-Content -LiteralPath $mediaPath -Value 'fixture' -Encoding UTF8
+                Mock Invoke-MediaNormalizerProcess {
+                    [pscustomobject]@{
+                        ExitCode = 0
+                        StdoutText = '{"format":{"duration":"1.25"},"streams":[{"index":0,"codec_type":"audio","codec_name":"aac","channels":2}],"chapters":[]}'
+                        StderrText = ''
+                    }
+                }
+
+                $inventory = Get-MediaInventory -FilePath $mediaPath
+                $inventory.Length | Should -Be ([IO.FileInfo]::new($mediaPath).Length)
+                $inventory.DurationSec | Should -Be 1.25
+                $inventory.StreamCounts.audio | Should -Be 1
             } finally {
                 Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
             }
@@ -502,7 +556,10 @@ Describe 'MediaNormalizer.Core coverage contracts' {
                     Logger = { param($message) }
                 }
                 $oldRuntimeRoot = $env:MEDIA_NORMALIZER_RUNTIME_ROOT
+                $oldFfmpegPath = $env:FFMPEG_PATH
+                $oldFfprobePath = $env:FFPROBE_PATH
                 try {
+                    Remove-Item Env:FFMPEG_PATH,Env:FFPROBE_PATH -ErrorAction SilentlyContinue
                     $env:MEDIA_NORMALIZER_RUNTIME_ROOT = Join-Path $tmp 'runtime'
                     Mock Find-FfmpegNormalize { $null }
                     (Invoke-Normalize @common).Fail | Should -Be 1
@@ -520,11 +577,15 @@ Describe 'MediaNormalizer.Core coverage contracts' {
                 } finally {
                     if ($null -eq $oldRuntimeRoot) { Remove-Item Env:MEDIA_NORMALIZER_RUNTIME_ROOT -ErrorAction SilentlyContinue }
                     else { $env:MEDIA_NORMALIZER_RUNTIME_ROOT = $oldRuntimeRoot }
+                    if ($null -eq $oldFfmpegPath) { Remove-Item Env:FFMPEG_PATH -ErrorAction SilentlyContinue }
+                    else { $env:FFMPEG_PATH = $oldFfmpegPath }
+                    if ($null -eq $oldFfprobePath) { Remove-Item Env:FFPROBE_PATH -ErrorAction SilentlyContinue }
+                    else { $env:FFPROBE_PATH = $oldFfprobePath }
                 }
 
                 $blockedParent = Join-Path $tmp 'blocked-parent'
                 Set-Content -LiteralPath $blockedParent -Value 'not a directory' -Encoding UTF8
-                Mock Get-Command { [pscustomobject]@{ Name = 'available' } }
+                Mock -ModuleName MediaNormalizer.Platform Get-Command { [pscustomobject]@{ Source = 'available' } }
                 $createResult = Invoke-Normalize @common -OutputDir (Join-Path $blockedParent 'child')
                 $createResult.Fail | Should -Be 1
             } finally {

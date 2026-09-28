@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "type": "capabilities-result",
+  "id": "c0000000-0000-4000-8000-000000000001",
+  "modes": [
+    "audio",
+    "video",
+    "both"
+  ],
+  "audioInputExtensions": [
+    ".mp3",
+    ".wav"
+  ],
+  "videoInputExtensions": [
+    ".mp4",
+    ".mkv"
+  ],
+  "audioOutputFormats": [
+    "mp3",
+    "m4a",
+    "aac",
+    "flac",
+    "wav",
+    "opus",
+    "ogg"
+  ]
+}

@@ -17,6 +17,19 @@
                 "archiveName": "ffmpeg-n8.1.2-34-g9b6c8969e0-winarm64-gpl-8.1.zip",
                 "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-07-31-14-10/ffmpeg-n8.1.2-34-g9b6c8969e0-winarm64-gpl-8.1.zip",
                 "sha256": "abf3b41c200ce5346b9bb5be6fe634c4720d891778d8921f7b36b76d002b3c96"
+            },
+            "osx-arm64": {
+                "archiveName": "ffmpeg.zip",
+                "url": "https://ffmpeg.martin-riedl.de/download/macos/arm64/1783011502_8.1.2/ffmpeg.zip",
+                "sha256": "ef1aa60006c7b77ce170c1608c08d8e4ba1c30c5746f2ac986ded932d0ac2c3c",
+                "ffprobeArchiveName": "ffprobe.zip",
+                "ffprobeUrl": "https://ffmpeg.martin-riedl.de/download/macos/arm64/1783011502_8.1.2/ffprobe.zip",
+                "ffprobeSha256": "c39787f4af7a3932502d2d48db6f6feaaa836b48a73ef78c32cc3285df61dfaf",
+                "version": "8.1.2",
+                "license": "GPL-3.0-or-later",
+                "provider": "Martin Riedl FFmpeg Build Server",
+                "buildSourceUrl": "https://git.martin-riedl.de/ffmpeg/build-script",
+                "acquiredOn": "2026-09-27"
             }
         }
     },
@@ -34,6 +47,16 @@
                 "archiveName": "python-3.13.14-embed-arm64.zip",
                 "url": "https://www.python.org/ftp/python/3.13.14/python-3.13.14-embed-arm64.zip",
                 "sha256": "8b5bfc935a24b55c17410aa0b21016ebeee225c96addf008d1d3cd83ff52eb43"
+            },
+            "osx-arm64": {
+                "version": "3.13.15",
+                "archiveName": "cpython-3.13.15+20260924-aarch64-apple-darwin-install_only.tar.gz",
+                "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20260924/cpython-3.13.15%2B20260924-aarch64-apple-darwin-install_only.tar.gz",
+                "sha256": "a18e1d1b6067d39cf7b2b605fdb78ad6b8a3aed221c44ef934d399dccf355453",
+                "releaseTag": "20260924",
+                "license": "PSF-2.0",
+                "sourceUrl": "https://github.com/astral-sh/python-build-standalone",
+                "acquiredOn": "2026-09-27"
             }
         }
     },
@@ -86,5 +109,21 @@
             "url": "https://files.pythonhosted.org/packages/47/d8/a29e4e3991765e7ce4ed1f7e4074fe1ba9da03e0048639734de60f9cadb9/mutagen-1.48.1-py3-none-any.whl",
             "sha256": "4f077fe87d3fc7fba259aa63d8c026b18382ca6a42ef37c61e16f1b1b5b82fe7"
         }
-    ]
+    ],
+    "powershell": {
+        "version": "7.6.6",
+        "release": "v7.6.6",
+        "license": "MIT",
+        "sourceUrl": "https://github.com/PowerShell/PowerShell/tree/v7.6.6",
+        "runtimes": {
+            "osx-arm64": {
+                "archiveName": "powershell-7.6.6-osx-arm64.tar.gz",
+                "url": "https://github.com/PowerShell/PowerShell/releases/download/v7.6.6/powershell-7.6.6-osx-arm64.tar.gz",
+                "sha256": "6df833d094ebac1c1a74340d7b3437f4aaf5e03ce640484a1c4359f3ce8b3db1",
+                "acquiredOn": "2026-09-27",
+                "version": "7.6.6",
+                "license": "MIT"
+            }
+        }
+    }
 }

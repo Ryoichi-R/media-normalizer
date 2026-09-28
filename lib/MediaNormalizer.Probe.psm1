@@ -1,4 +1,5 @@
 ﻿Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot 'MediaNormalizer.Platform.psm1') -Force -Scope Local -DisableNameChecking
 
 function Format-FileSize {
     param([long]$Bytes)
@@ -26,7 +27,7 @@ function Format-Duration {
 function Test-FfprobeAvailable {
     param([pscustomobject]$State)
     if ($null -eq $State.FfprobeAvailable) {
-        $State.FfprobeAvailable = [bool](Get-Command ffprobe -ErrorAction SilentlyContinue)
+        try { $State.FfprobeAvailable = -not [string]::IsNullOrWhiteSpace([string](Resolve-MediaNormalizerCommand -Name FFprobe)) } catch { $State.FfprobeAvailable = $false }
     }
     return $State.FfprobeAvailable
 }
@@ -39,7 +40,8 @@ function Get-MediaDuration {
     if (-not (Test-FfprobeAvailable -State $State)) { return -1.0 }
     try {
         $ffprobeArgs = @('-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', $FilePath)
-        $result = & ffprobe @ffprobeArgs 2>$null
+        $ffprobePath = Resolve-MediaNormalizerCommand -Name FFprobe -Required
+        $result = & $ffprobePath @ffprobeArgs 2>$null
         $resultStr = (@($result) -join '').Trim()
         if ([string]::IsNullOrWhiteSpace($resultStr)) { return -1.0 }
         $dur = 0.0

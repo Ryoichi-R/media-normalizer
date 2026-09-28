@@ -1,10 +1,10 @@
-#Requires -Modules Pester
+﻿#Requires -Modules Pester
 
 BeforeAll {
     . (Join-Path $PSScriptRoot '..\..\installer\MediaNormalizer.Installer.Common.ps1')
 }
 
-Describe 'Media Normalizer installer managed path safety' {
+Describe 'Media Normalizer installer managed path safety' -Tag 'WindowsOnly' {
     BeforeEach {
         $script:testRoot = Join-Path ([IO.Path]::GetTempPath()) (
             'mn-installer-path-' + [Guid]::NewGuid().ToString('N'))

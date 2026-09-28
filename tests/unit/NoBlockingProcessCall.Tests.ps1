@@ -1,4 +1,4 @@
-#Requires -Modules Pester
+﻿#Requires -Modules Pester
 
 <#
     TODO.md MN-10 / plans/media-normalizer-ui-responsiveness-remediation-plan.md 設計判断7。
@@ -32,7 +32,7 @@ function script:Get-ScriptblockTypedParameterNames {
             [void]$names.Add($left.Child.VariablePath.UserPath)
         }
     }
-    return $names
+    return ,$names
 }
 
 function script:Find-MediaNormalizerBlockingCalls {
@@ -137,10 +137,11 @@ Describe 'lib 内の外部プロセス直接待機 (NoBlockingProcessCall)' {
         # Pattern は該当行のテキストに対する正規表現。
         $script:AllowList = @(
             @{ File = 'MediaNormalizer.Core.psm1'; Function = 'Invoke-MediaNormalizerProcess'; Pattern = 'taskkill\.exe /T /F /PID \$proc\.Id'; Reason = 'runner 実装本体の CancelAction'; TodoId = $null }
-            @{ File = 'MediaNormalizer.Core.psm1'; Function = 'Invoke-MediaNormalizerProcess'; Pattern = '\$proc\.WaitForExit\(\)'; Reason = 'runner 実装本体'; TodoId = $null }
+            @{ File = 'MediaNormalizer.Core.psm1'; Function = 'Invoke-MediaNormalizerProcess'; Pattern = '\$proc\.WaitForExit\('; Reason = 'runner実装本体・停止確認後cleanup'; TodoId = $null }
+            @{ File = 'MediaNormalizer.Core.psm1'; Function = 'Invoke-MediaNormalizerProcess'; Pattern = '&\s*\$outputPump(?:\s|$)'; Reason = 'POSIX stdout/stderr pump'; TodoId = $null }
             @{ File = 'MediaNormalizer.Core.psm1'; Function = 'Test-FfmpegNormalizePython'; Pattern = '&\s*\$Command\s'; Reason = '-c import の即時終了チェック'; TodoId = $null }
             @{ File = 'MediaNormalizer.Core.psm1'; Function = 'Invoke-NormalizeCli'; Pattern = 'taskkill\.exe /T /F /PID \$state\.RunningProcess\.Id'; Reason = 'CLI終了時の後始末。終了コード上書き問題と併せて扱う'; TodoId = 'MN-2' }
-            @{ File = 'MediaNormalizer.Probe.psm1'; Function = 'Get-MediaDuration'; Pattern = '&\s*ffprobe\s'; Reason = '一覧スキャン経路'; TodoId = 'MN-5' }
+            @{ File = 'MediaNormalizer.Probe.psm1'; Function = 'Get-MediaDuration'; Pattern = '&\s*\$ffprobePath\s'; Reason = '一覧スキャン経路'; TodoId = 'MN-5' }
             @{ File = 'MediaNormalizer.Ui.psm1'; Function = '$script:ProbeScriptBlock'; Pattern = '&\s*ffprobe\s'; Reason = 'ThreadJob 内で別スレッド実行のため UI をブロックしない'; TodoId = 'MN-5' }
         )
     }

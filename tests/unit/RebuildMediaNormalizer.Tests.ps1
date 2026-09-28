@@ -1,4 +1,4 @@
-#Requires -Modules Pester
+﻿#Requires -Modules Pester
 
 Describe 'Media Normalizer build contract' {
     BeforeAll {
@@ -15,7 +15,7 @@ Describe 'Media Normalizer build contract' {
         $exitCode | Should -Be 0
     }
 
-    It 'fails closed when a portable package loses its runtime manifest' {
+    It 'fails closed when a portable package loses its runtime manifest' -Tag 'WindowsOnly' {
         $packageRoot = Join-Path $TestDrive 'missing-runtime-package'
         New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
         $batchPath = Join-Path $packageRoot 'runtime-env.bat'

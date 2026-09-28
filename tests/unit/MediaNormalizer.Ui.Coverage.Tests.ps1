@@ -1,4 +1,4 @@
-#Requires -Modules Pester
+﻿#Requires -Modules Pester
 
 Set-StrictMode -Version Latest
 
@@ -18,10 +18,17 @@ Describe 'MediaNormalizer.Ui coverage contracts' {
                 (Get-LegacyAutoInputDir) | Should -Match 'pre-normalization data$'
                 (Get-LegacyAutoOutputDir) | Should -Match 'normalization data$'
             } else {
-                { Get-SettingsPath } | Should -Throw
-                { Get-LogPath } | Should -Throw
-                { Get-LegacyAutoInputDir } | Should -Throw
-                { Get-LegacyAutoOutputDir } | Should -Throw
+                (Get-SettingsPath) | Should -Match 'settings\.json$'
+                (Get-LogPath) | Should -Match 'media-normalizer\.log$'
+                if ($IsMacOS) {
+                    (Get-LegacyAutoInputDir) | Should -Match 'pre-normalization data$'
+                    (Get-LegacyAutoOutputDir) | Should -Match 'normalization data$'
+                } else {
+                    { Get-LegacyAutoInputDir } | Should -Throw
+                    { Get-LegacyAutoOutputDir } | Should -Throw
+                }
+                (Get-SettingsPath) | Should -Not -Match '(?i)\.app/Contents/'
+                (Get-LogPath) | Should -Not -Match '(?i)\.app/Contents/'
             }
         }
     }
@@ -51,7 +58,7 @@ Describe 'MediaNormalizer.Ui coverage contracts' {
         InModuleScope MediaNormalizer.Ui {
             $state = [pscustomobject]@{ LogBuffer = [Text.StringBuilder]::new() }
             Write-ProcessOutputLog -State $state -Text "`e[32mFile: 1/2`r`nStream 1/2: ignored`nUseful output`rSecond Pass: ignored`n"
-            $state.LogBuffer.ToString() | Should -Be "  Useful output`r`n"
+            $state.LogBuffer.ToString() | Should -Be ("  Useful output" + [Environment]::NewLine)
         }
     }
 

@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "type": "scan-result",
+  "id": "c0000000-0000-4000-8000-000000000002",
+  "files": [
+    {
+      "path": "/tmp/input/a.mp3",
+      "extension": ".mp3",
+      "audioEligible": true,
+      "videoEligible": false
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 2,
+  "runId": "6f55000c-709c-40f0-9f76-ececf7a5e3ca",
+  "entrypoint": "gui",
+  "status": "completed",
+  "ownerProcessId": 4242,
+  "startedAtUtc": "2026-09-27T00:00:00.0000000Z",
+  "updatedAtUtc": "2026-09-27T00:05:00.0000000Z",
+  "resultCode": 0,
+  "hostStartedAtUtc": "2026-09-26T23:58:00.0000000Z",
+  "workerProcessId": 4243,
+  "workerStartedAtUtc": "2026-09-27T00:00:00.5000000Z",
+  "processes": [],
+  "intermediatePaths": [],
+  "pendingProcessStarts": [],
+  "recoveryMessage": null
+}

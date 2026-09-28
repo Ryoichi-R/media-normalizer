@@ -208,6 +208,15 @@ Describe 'P0 output integrity and safe promotion' {
         [IO.Path]::GetFileName($temporaryPath) | Should -Match '^\.sample\.media-normalizer-'
     }
 
+    It 'includes the run identity in recovery-cleanable temporary output names' {
+        $finalPath = Join-Path $TestDrive 'run-scopedsample.flac'
+        $runId = '6f55000c-709c-40f0-9f76-ececf7a5e3ca'
+        $temporaryPath = New-SafeOutputPath -FinalPath $finalPath -RunId $runId
+        [IO.Path]::GetFileName($temporaryPath) | Should -Match ([regex]::Escape($runId))
+        [IO.Path]::GetExtension($temporaryPath) | Should -Be '.flac'
+        [IO.Path]::GetFullPath($temporaryPath) | Should -Not -Be ([IO.Path]::GetFullPath($finalPath))
+    }
+
     It 'replaces an existing final file only at promotion time' {
         $directory = Join-Path $TestDrive 'promote'
         New-Item -ItemType Directory -Path $directory -Force | Out-Null

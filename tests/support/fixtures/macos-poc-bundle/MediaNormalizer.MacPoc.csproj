@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AnalysisMode>Recommended</AnalysisMode>
+    <Deterministic>true</Deterministic>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <AssemblyName>MediaNormalizer.MacPoc</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.20" />
+  </ItemGroup>
+</Project>

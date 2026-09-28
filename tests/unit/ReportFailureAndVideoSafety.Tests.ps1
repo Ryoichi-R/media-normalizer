@@ -1,12 +1,25 @@
-#Requires -Modules Pester
+﻿#Requires -Modules Pester
 
 BeforeAll {
     Import-Module (Join-Path $PSScriptRoot '..\..\lib\MediaNormalizer.Progress.psm1') -Force
     Import-Module (Join-Path $PSScriptRoot '..\..\lib\MediaNormalizer.Probe.psm1') -Force
     Import-Module (Join-Path $PSScriptRoot '..\..\lib\MediaNormalizer.Core.psm1') -Force
+    $script:oldFfmpegOverride = [Environment]::GetEnvironmentVariable('FFMPEG_PATH')
+    $script:oldFfprobeOverride = [Environment]::GetEnvironmentVariable('FFPROBE_PATH')
+    $script:useFakeMediaTools = [Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT
+    if ($script:useFakeMediaTools) {
+        $env:FFMPEG_PATH = '/usr/bin/true'
+        $env:FFPROBE_PATH = '/usr/bin/true'
+    }
 }
 
 AfterAll {
+    if ($script:useFakeMediaTools) {
+        if ($null -eq $script:oldFfmpegOverride) { Remove-Item Env:FFMPEG_PATH -ErrorAction SilentlyContinue }
+        else { $env:FFMPEG_PATH = $script:oldFfmpegOverride }
+        if ($null -eq $script:oldFfprobeOverride) { Remove-Item Env:FFPROBE_PATH -ErrorAction SilentlyContinue }
+        else { $env:FFPROBE_PATH = $script:oldFfprobeOverride }
+    }
     Remove-Module MediaNormalizer.Core -Force -ErrorAction SilentlyContinue
     Remove-Module MediaNormalizer.Probe -Force -ErrorAction SilentlyContinue
     Remove-Module MediaNormalizer.Progress -Force -ErrorAction SilentlyContinue
@@ -42,44 +55,35 @@ Describe 'Write-NormalizationReport failure contract' {
         $output = Join-Path $script:testRoot 'out'
         New-Item -Path $output -ItemType Directory | Out-Null
         $report = Join-Path $output 'locked.json'
-        [IO.File]::WriteAllText($report, 'locked')
-        $lock = [IO.File]::Open(
-            $report,
-            [IO.FileMode]::Open,
-            [IO.FileAccess]::ReadWrite,
-            [IO.FileShare]::None)
-        try {
-            $state = New-MediaNormalizerState
-            $analysis = [pscustomobject]@{
-                Streams = @([pscustomobject]@{
-                    AudioStreamIndex = 0
-                    IntegratedLufs = -20.0
-                    TruePeakDbtp = -3.0
-                })
-            }
-            $result = Invoke-Normalize `
-                -State $state `
-                -Mode audio `
-                -InputDir $script:testRoot `
-                -OutputDir $output `
-                -Target -16 `
-                -TruePeak -1 `
-                -Bitrate '192k' `
-                -SampleRate '48000' `
-                -CollisionPolicy rename `
-                -TargetFiles @((Get-Item -LiteralPath $input)) `
-                -AnalyzeOnly `
-                -ReportPath $report `
-                -Analyzer { param($path, $target, $truePeak) $analysis }.GetNewClosure() `
-                -Logger { param($message) }
-
-            $result.Analyzed | Should -Be 1
-            $result.Fail | Should -Be 0
-            $result.ReportSucceeded | Should -BeFalse
-            $result.ReportError | Should -Not -BeNullOrEmpty
-        } finally {
-            $lock.Dispose()
+        New-Item -Path $report -ItemType Directory | Out-Null
+        $state = New-MediaNormalizerState
+        $analysis = [pscustomobject]@{
+            Streams = @([pscustomobject]@{
+                AudioStreamIndex = 0
+                IntegratedLufs = -20.0
+                TruePeakDbtp = -3.0
+            })
         }
+        $result = Invoke-Normalize `
+            -State $state `
+            -Mode audio `
+            -InputDir $script:testRoot `
+            -OutputDir $output `
+            -Target -16 `
+            -TruePeak -1 `
+            -Bitrate '192k' `
+            -SampleRate '48000' `
+            -CollisionPolicy rename `
+            -TargetFiles @((Get-Item -LiteralPath $input)) `
+            -AnalyzeOnly `
+            -ReportPath $report `
+            -Analyzer { param($path, $target, $truePeak) $analysis }.GetNewClosure() `
+            -Logger { param($message) }
+
+        $result.Analyzed | Should -Be 1
+        $result.Fail | Should -Be 0
+        $result.ReportSucceeded | Should -BeFalse
+        $result.ReportError | Should -Not -BeNullOrEmpty
     }
 }
 

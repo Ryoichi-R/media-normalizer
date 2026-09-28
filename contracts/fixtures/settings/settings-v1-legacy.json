@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "inputDir": "/Users/fixtures/pre-normalization data",
+  "outputDir": "/Users/fixtures/custom-output",
+  "lastPreset": "legacy-preset",
+  "lastMode": "both"
+}

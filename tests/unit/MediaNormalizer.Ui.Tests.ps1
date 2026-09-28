@@ -1,4 +1,4 @@
-#Requires -Modules Pester
+﻿#Requires -Modules Pester
 
 Set-StrictMode -Version Latest
 
@@ -330,7 +330,7 @@ Describe 'Save-Settings' {
     It '書き込み失敗時に State.LogBuffer に [WARN ] を残す' {
         InModuleScope MediaNormalizer.Ui -Parameters @{ p = $script:savePath } {
             param($p)
-            Mock Set-Content { throw 'simulated write failure' }
+            Mock -CommandName Set-Content -ModuleName MediaNormalizer.UiLogic -MockWith { throw 'simulated write failure' }
 
             $state = [pscustomobject]@{
                 LogBuffer = New-Object System.Text.StringBuilder
@@ -344,7 +344,7 @@ Describe 'Save-Settings' {
     It 'State 未指定なら例外を投げず黙ってスキップ（後方互換）' {
         InModuleScope MediaNormalizer.Ui -Parameters @{ p = $script:savePath } {
             param($p)
-            Mock Set-Content { throw 'simulated write failure' }
+            Mock -CommandName Set-Content -ModuleName MediaNormalizer.UiLogic -MockWith { throw 'simulated write failure' }
 
             { Save-Settings -SettingsPath $p -InputDir 'C:\in' -OutputDir 'C:\out' -LastPreset 'x' -LastMode 'audio' } |
                 Should -Not -Throw
