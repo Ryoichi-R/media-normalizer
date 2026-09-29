@@ -24,8 +24,8 @@ $env:AVALONIA_TELEMETRY_OPTOUT = '1'
 if ($LASTEXITCODE -ne 0) { throw 'GUI publish failed.' }
 } finally { $env:AVALONIA_TELEMETRY_OPTOUT = $previousTelemetry }
 foreach ($relative in @('media-normalizer.ps1','media-normalizer.sh','runtime-env.sh','runtime-check.sh','diagnose.sh','LICENSE','THIRD-PARTY-NOTICES.md',
-        'assets/presets.json','scripts/mn-worker.ps1','diagnostics/runtime-check.ps1','diagnostics/runtime-check-macos.ps1','diagnostics/diagnose.ps1')) {
-    $destination = Join-Path $res $relative
+        'assets/presets.json','assets/MediaNormalizer.icns','scripts/mn-worker.ps1','diagnostics/runtime-check.ps1','diagnostics/runtime-check-macos.ps1','diagnostics/diagnose.ps1')) {
+    $destination = Join-Path $res $(if ($relative -eq 'assets/MediaNormalizer.icns') { 'MediaNormalizer.icns' } else { $relative })
     $null = New-Item -ItemType Directory -Path (Split-Path $destination) -Force
     Copy-Item -LiteralPath (Join-Path $source $relative) -Destination $destination
 }
@@ -61,6 +61,7 @@ Get-ChildItem -LiteralPath $generatedRuntime -Recurse -Directory -Filter '__pyca
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>media-normalizer</string>
 <key>CFBundleIdentifier</key><string>local.media-normalizer.app</string>
+<key>CFBundleIconFile</key><string>MediaNormalizer.icns</string>
 <key>CFBundleName</key><string>Media Normalizer</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>1.0.0</string>

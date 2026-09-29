@@ -902,7 +902,8 @@ function New-FfmpegSpeedArguments {
         [Parameter(Mandatory)][string]$InputPath,
         [Parameter(Mandatory)][string]$OutputPath,
         [Parameter(Mandatory)][int]$SpeedPercent,
-        [Parameter(Mandatory)]$IntermediateProfile
+        [Parameter(Mandatory)]$IntermediateProfile,
+        $Inventory
     )
 
     $factorText = ConvertTo-SpeedFactorText -SpeedPercent $SpeedPercent
@@ -937,6 +938,14 @@ function New-FfmpegSpeedArguments {
     if ($IntermediateProfile.PreserveData) { $arguments += @('-c:d', 'copy') }
     if ($IntermediateProfile.PreserveAttachments) { $arguments += @('-c:t', 'copy') }
     $arguments += @('-map_metadata', '0', '-map_chapters', '0')
+    if ($Inventory) {
+        foreach ($kind in @(@('audio', 'a'), @('video', 'v'), @('subtitle', 's'))) {
+            for ($index = 0; $index -lt [int]$Inventory.StreamCounts[$kind[0]]; $index++) {
+                $specifier = "$($kind[1]):$index"
+                $arguments += @("-map_metadata:s:$specifier", "0:s:$specifier")
+            }
+        }
+    }
     if (-not $IntermediateProfile.PreserveData) {
         # mov/mp4系muxerが映像ストリームのtimecodeメタデータからtmcdトラックを
         # 自動再生成することがあるため(Phase 2A実測)、data未保持時は明示的に無効化する。
@@ -971,6 +980,80 @@ function Remove-MediaNormalizerTemporaryFile {
         }
     }
     return $false
+}
+
+function Restore-MediaNormalizerTrackCreationTimes {
+    # FFmpeg's MOV muxer initializes every track from the container creation time.
+    # Restore only fixed-size creation fields in the new temporary output; media bytes and offsets stay unchanged.
+    param([string]$InputPath, [string]$OutputPath)
+    if ([IO.Path]::GetExtension($InputPath).ToLowerInvariant() -notin @('.mp4', '.mov', '.m4v') -or
+        [IO.Path]::GetExtension($OutputPath).ToLowerInvariant() -notin @('.mp4', '.mov', '.m4v')) { return }
+    if ([IO.Path]::GetFullPath($InputPath) -eq [IO.Path]::GetFullPath($OutputPath)) { throw 'Timestamp restoration requires a separate temporary output.' }
+    function Read-BytesAt($stream, [long]$offset, [int]$count) {
+        $stream.Position = $offset
+        $bytes = [byte[]]::new($count)
+        if ($stream.Read($bytes, 0, $count) -ne $count) { throw 'Truncated MP4 timestamp header.' }
+        return ,$bytes
+    }
+    function Read-BigEndian($bytes) {
+        [uint64]$number = 0
+        foreach ($b in $bytes) { $number = ($number -shl 8) -bor $b }
+        return $number
+    }
+    function Get-Boxes($stream, [long]$start, [long]$end) {
+        $position = $start
+        while ($position -lt $end) {
+            if ($end - $position -lt 8) { throw 'Truncated MP4 box.' }
+            $header = Read-BytesAt $stream $position 8
+            $size = Read-BigEndian $header[0..3]
+            $headerSize = 8
+            if ($size -eq 1) { $size = Read-BigEndian (Read-BytesAt $stream ($position + 8) 8); $headerSize = 16 }
+            if ($size -eq 0) { $size = $end - $position }
+            if ($size -lt $headerSize -or $size -gt ($end - $position)) { throw 'Invalid MP4 box size.' }
+            [pscustomobject]@{ Type = [Text.Encoding]::ASCII.GetString($header,4,4); Data = $position + $headerSize; End = $position + [long]$size }
+            $position += [long]$size
+        }
+    }
+    function Get-TrackHeaders($stream) {
+        $movies = @(Get-Boxes $stream 0 $stream.Length | Where-Object Type -eq 'moov')
+        if ($movies.Count -ne 1) { throw 'Expected one MP4 movie box.' }
+        $indices = @{}
+        foreach ($track in @(Get-Boxes $stream $movies[0].Data $movies[0].End | Where-Object Type -eq 'trak')) {
+            $children = @(Get-Boxes $stream $track.Data $track.End)
+            $media = @($children | Where-Object Type -eq 'mdia')
+            if ($media.Count -ne 1) { throw 'Invalid MP4 media box.' }
+            $mediaChildren = @(Get-Boxes $stream $media[0].Data $media[0].End)
+            $handler = @($mediaChildren | Where-Object Type -eq 'hdlr')
+            if ($handler.Count -ne 1 -or $handler[0].End - $handler[0].Data -lt 12) { throw 'Invalid MP4 handler.' }
+            $type = [Text.Encoding]::ASCII.GetString((Read-BytesAt $stream ($handler[0].Data + 8) 4))
+            if (-not $indices.ContainsKey($type)) { $indices[$type] = 0 }
+            $key = "$type/$($indices[$type])"; $indices[$type]++
+            foreach ($box in @($children | Where-Object Type -eq 'tkhd') + @($mediaChildren | Where-Object Type -eq 'mdhd')) {
+                $version = (Read-BytesAt $stream $box.Data 1)[0]
+                if ($version -notin @(0,1)) { throw 'Unsupported MP4 timestamp version.' }
+                $width = if ($version -eq 1) { 8 } else { 4 }
+                if ($box.End - $box.Data -lt 4 + $width) { throw 'Truncated MP4 creation time.' }
+                [pscustomobject]@{ Key = "$key/$($box.Type)"; Offset = $box.Data + 4; Width = $width; Value = (Read-BigEndian (Read-BytesAt $stream ($box.Data + 4) $width)) }
+            }
+        }
+    }
+    $inputStream = [IO.File]::OpenRead($InputPath)
+    try { $original = @{}; foreach ($header in @(Get-TrackHeaders $inputStream)) { $original[$header.Key] = $header.Value } }
+    finally { $inputStream.Dispose() }
+    $outputStream = [IO.File]::Open($OutputPath, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    try {
+        $headers = @(Get-TrackHeaders $outputStream)
+        foreach ($header in $headers) {
+            if (-not $original.ContainsKey($header.Key)) { continue }
+            [uint64]$value = $original[$header.Key]
+            if ($header.Width -eq 4 -and $value -gt [uint32]::MaxValue) { throw 'Original MP4 creation time exceeds output header range.' }
+            $bytes = [BitConverter]::GetBytes($value)
+            if ([BitConverter]::IsLittleEndian) { [array]::Reverse($bytes) }
+            $outputStream.Position = $header.Offset
+            $outputStream.Write($bytes, 8 - $header.Width, $header.Width)
+        }
+        $outputStream.Flush()
+    } finally { $outputStream.Dispose() }
 }
 
 function New-FfmpegNormalizeArguments {
@@ -1055,6 +1138,7 @@ function New-MediaNormalizerState {
         ProcessingStartTime = $null
         CurrentFileElapsedSec = 0.0
         ReportRecords       = [System.Collections.Generic.List[object]]::new()
+        PhaseEtaSeconds     = $null
         ReportPath          = $null
         CurrentPhase         = $null
         PhaseProgressPercent = -1.0
@@ -1173,6 +1257,14 @@ function Wait-MediaNormalizerProcessWithProgress {
                 $State.PhaseProgressPercent = [math]::Max(
                     0.0,
                     [math]::Min(100.0, $PhaseProgressBasePercent + ($streamPercent * $PhaseProgressScale)))
+            }
+            $State.PhaseEtaSeconds = $null
+            $wallSeconds = ($now - $startAt).TotalSeconds
+            if ($wallSeconds -ge 2 -and $partialSec -gt 0 -and $CurrentFileDurationSec -gt $partialSec) {
+                $remaining = $wallSeconds * ($CurrentFileDurationSec - $partialSec) / $partialSec
+                if (-not [double]::IsNaN($remaining) -and -not [double]::IsInfinity($remaining)) {
+                    $State.PhaseEtaSeconds = [math]::Max(0.0, $remaining)
+                }
             }
             if ($Progress) { & $Progress $State.ProgressCurrent $State.ProgressTotal }
             $lastUiUpdate = $now
@@ -1351,6 +1443,7 @@ function Invoke-MediaNormalizerProcess {
     }
     $progressSourcePath = if ($WriteProgressFile) { $progressTmp } else { $stdoutTmp }
 
+    $State.PhaseEtaSeconds = $null
     $State.CurrentPhase = $PhaseLabel
     $State.PhaseProgressPercent = -1.0
     if ($Progress) { & $Progress $State.ProgressCurrent $State.ProgressTotal }
@@ -1390,6 +1483,18 @@ function Invoke-MediaNormalizerProcess {
         } else {
             $startInfo = [Diagnostics.ProcessStartInfo]::new()
             $startInfo.FileName = $FilePath
+            if ($workerContext) {
+                # Keep the same PID alive until the host has durably registered it.
+                # Positional arguments avoid shell interpolation of paths and media names.
+                # EOF/rejection never starts the target; exec preserves PID and start time.
+                $startInfo.FileName = '/bin/sh'
+                $startInfo.RedirectStandardInput = $true
+                $startInfo.ArgumentList.Add('-c')
+                $startInfo.ArgumentList.Add('IFS= read -r ack && [ "$ack" = "$1" ] || exit 125; shift; exec "$@" </dev/null')
+                $startInfo.ArgumentList.Add('media-normalizer-start-gate')
+                $startInfo.ArgumentList.Add($processToken)
+                $startInfo.ArgumentList.Add($FilePath)
+            }
             $startInfo.UseShellExecute = $false
             $startInfo.CreateNoWindow = $true
             $startInfo.RedirectStandardOutput = $true
@@ -1454,6 +1559,11 @@ function Invoke-MediaNormalizerProcess {
             Wait-MediaNormalizerWorkerProcessRegistration -Context $workerContext -RunId $workerContext.RunId `
                 -ProcessToken $processToken -ProcessId ([int]$proc.Id) -ProcessStartedAtUtc $processStartedAtUtc `
                 -State $State -PumpEvents $PumpEvents
+            if (-not $useWindowsStartProcess) {
+                $proc.StandardInput.WriteLine($processToken)
+                $proc.StandardInput.Flush()
+                $proc.StandardInput.Close()
+            }
         }
 
         $cancelFired = $false
@@ -1564,6 +1674,7 @@ function Invoke-MediaNormalizerProcess {
         if (-not $retainTemporaryLogs) {
             $State.RunningProcess = $null
         }
+        $State.PhaseEtaSeconds = $null
         $State.CurrentPhase = $null
         $State.PhaseProgressPercent = -1.0
         if ($Progress) { & $Progress $State.ProgressCurrent $State.ProgressTotal }
@@ -1917,10 +2028,7 @@ function New-MediaNormalizerEventCallbacks {
             $percent = if ([int]$total -gt 0) { ([double]$current / [double]$total) * 100.0 } else { 0.0 }
         }
         $eta = $null
-        if ([double]$progressState.TotalDurationSec -gt 0) {
-            $eta = [math]::Max(0.0, [double]$progressState.TotalDurationSec -
-                [double]$progressState.ProcessedDurationSec - [double]$progressState.CurrentFileElapsedSec)
-        }
+        if ($progressState.PSObject.Properties['PhaseEtaSeconds']) { $eta = $progressState.PhaseEtaSeconds }
         $phase = if ([string]::IsNullOrWhiteSpace([string]$progressState.CurrentPhase)) { 'overall' } else { [string]$progressState.CurrentPhase }
         $null = $sink.Invoke([pscustomobject]@{
             schemaVersion = 1; type = 'progress'; runId = $RunId
@@ -2304,7 +2412,8 @@ function Invoke-Normalize {
                                 -InputPath $f.FullName `
                                 -OutputPath $speedTemp `
                                 -SpeedPercent $currentSpeedPercent `
-                                -IntermediateProfile $intermediateProfile
+                                -IntermediateProfile $intermediateProfile `
+                                -Inventory $inputInventory
                             & $Logger "  [CMD] ffmpeg $(ConvertTo-DisplayCommandArguments -Arguments $speedArgs)"
                             $speedResult = Invoke-MediaNormalizerProcess `
                                 -FilePath (Resolve-MediaNormalizerExecutable -Name FFmpeg) `
@@ -2374,6 +2483,9 @@ function Invoke-Normalize {
                         $record.action = 'normalized'
                     }
 
+                    if ($Mode -eq 'video' -and $record.action -eq 'normalized') {
+                        Restore-MediaNormalizerTrackCreationTimes -InputPath $f.FullName -OutputPath $workingOutPath
+                    }
                     $outputInventory = Get-MediaInventory -FilePath $workingOutPath `
                         -State $State -Logger $Logger -Progress $Progress -PumpEvents $PumpEvents -CliMode:$CliMode `
                         -CancellationToken $CancellationToken

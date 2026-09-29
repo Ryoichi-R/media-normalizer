@@ -94,13 +94,6 @@ function Get-FfmpegProgress {
     }
 
     if ($CurrentFileDurationSec -gt 0) {
-        $fileMatches = [regex]::Matches($clean, 'File:\s*([0-9]+(?:\.[0-9]+)?)%')
-        if ($fileMatches.Count -gt 0) {
-            $pct = ConvertTo-InvariantDouble -Value $fileMatches[$fileMatches.Count - 1].Groups[1].Value
-            $sec = $CurrentFileDurationSec * $pct / 100.0
-            return [math]::Max(0.0, [math]::Min($CurrentFileDurationSec, $sec))
-        }
-
         $secondPassMatches = [regex]::Matches($clean, 'Second Pass:\s*([0-9]+(?:\.[0-9]+)?)%')
         if ($secondPassMatches.Count -gt 0) {
             $pct = ConvertTo-InvariantDouble -Value $secondPassMatches[$secondPassMatches.Count - 1].Groups[1].Value
@@ -114,6 +107,13 @@ function Get-FfmpegProgress {
             $pct = ConvertTo-InvariantDouble -Value $streamMatches[$streamMatches.Count - 1].Groups[1].Value
             $ratio = $pct / 200.0
             $sec = $CurrentFileDurationSec * $ratio
+            return [math]::Max(0.0, [math]::Min($CurrentFileDurationSec, $sec))
+        }
+        # Per-file task counters stay at 0 while inner passes run; prefer the pass progress.
+        $fileMatches = [regex]::Matches($clean, 'File:\s*([0-9]+(?:\.[0-9]+)?)%')
+        if ($fileMatches.Count -gt 0) {
+            $pct = ConvertTo-InvariantDouble -Value $fileMatches[$fileMatches.Count - 1].Groups[1].Value
+            $sec = $CurrentFileDurationSec * $pct / 100.0
             return [math]::Max(0.0, [math]::Min($CurrentFileDurationSec, $sec))
         }
     }

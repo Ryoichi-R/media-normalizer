@@ -6,6 +6,7 @@ using Avalonia.Input;
 using Avalonia.Layout;
 using Avalonia.Platform.Storage;
 using Avalonia.Threading;
+using Avalonia.VisualTree;
 using MediaNormalizer.Gui.Services;
 
 namespace MediaNormalizer.Gui;
@@ -24,7 +25,7 @@ public sealed class MainWindow : Window
     private readonly ComboBox _presets = new() { MinWidth = 250 };
     private readonly NumericUpDown _target = new() { Minimum = -70, Maximum = -5, Value = -16, Width = 140 };
     private readonly NumericUpDown _peak = new() { Minimum = -9, Maximum = 0, Value = -1, Width = 130 };
-    private readonly NumericUpDown _speed = new() { Minimum = 50, Maximum = 200, Value = 100, Width = 130 };
+    private readonly NumericUpDown _speed = new() { Minimum = 50, Maximum = 200, Increment = 10, Value = 100, Width = 130 };
     private readonly ComboBox _collision = new() { ItemsSource = new[] { "rename", "skip", "overwrite" }, SelectedIndex = 0, MinWidth = 110 };
     private readonly CheckBox _analyze = new() { Content = "解析のみ" };
     private readonly CheckBox _recurse = new() { Content = "サブフォルダを検索", IsChecked = true };
@@ -33,7 +34,7 @@ public sealed class MainWindow : Window
     private readonly TextBlock _basis = new() { TextWrapping = Avalonia.Media.TextWrapping.Wrap };
     private readonly TextBlock _status = new() { Text = "起動診断中…", FontSize = 18 };
     private readonly ProgressBar _progress = new() { Minimum = 0, Maximum = 100, Height = 10 };
-    private readonly TextBox _log = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = Avalonia.Media.TextWrapping.Wrap, MinHeight = 130 };
+    private readonly TextBox _log = new() { IsReadOnly = true, AcceptsReturn = true, TextWrapping = Avalonia.Media.TextWrapping.Wrap, MinHeight = 100 };
     private readonly StackPanel _rowsPanel = new() { Spacing = 4 };
     private readonly List<FileRow> _rows = [];
     private readonly Dictionary<string, (bool Selected, decimal? Speed)> _rowState = new(StringComparer.Ordinal);
@@ -60,6 +61,7 @@ public sealed class MainWindow : Window
         _runtime = runtime;
         _settings = new SettingsStore(Path.Combine(runtime.StorageRoot, "settings.json"));
         _saved = _settings.Read();
+        Icon = new WindowIcon(Avalonia.Platform.AssetLoader.Open(new Uri("avares://MediaNormalizer.Gui/Assets/media-normalizer-icon.png")));
         Title = "Media Normalizer"; Width = 1180; Height = 830; MinWidth = 1100; MinHeight = 650;
         _input.Text = _saved.Values.InputDir; _output.Text = _saved.Values.OutputDir;
         _mode.SelectedItem = _saved.Values.LastMode ?? "audio";
@@ -77,12 +79,13 @@ public sealed class MainWindow : Window
         _options.Children.Add(Line(Label("目標 LUFS"), _target, Label("上限 dBTP"), _peak, Label("速度 %"), _speed, Label("同名出力"), _collision));
         _options.Children.Add(Line(_analyze, _recurse, _hierarchy, _skip));
         _options.Children.Add(_basis);
-        var body = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,Auto,*,Auto,Auto"), Margin = new Thickness(20), RowSpacing = 10 };
+        var body = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,Auto,2*,Auto,3*"), Margin = new Thickness(20), RowSpacing = 10 };
         body.Children.Add(_status);
-        AddAt(body, _options, 1);
+        AddAt(body, new ScrollViewer { Content = _options, MaxHeight = 300, VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto }, 1);
         AddAt(body, Line(_scan, _run, _cancel, Label("一覧のチェックを外すと処理対象から除外します。")), 2);
-        AddAt(body, new ScrollViewer { Content = _rowsPanel, MinHeight = 100 }, 3);
+        AddAt(body, new ScrollViewer { Content = _rowsPanel, MinHeight = 60 }, 3);
         AddAt(body, _progress, 4); AddAt(body, _log, 5); Content = body;
+        ScrollViewer.SetVerticalScrollBarVisibility(_log, Avalonia.Controls.Primitives.ScrollBarVisibility.Visible);
         _scan.Click += async (_, _) => await ScanAsync();
         _run.Click += async (_, _) => { try { await NormalizeAsync(); } catch (Exception exception) { AppendLog(exception.Message); _status.Text = "入力内容をご確認ください。"; } };
         _cancel.Click += (_, _) => { _cancelSource?.Cancel(); _status.Text = "キャンセル・回収完了を待っています…"; _cancel.IsEnabled = false; };
@@ -290,7 +293,7 @@ public sealed class MainWindow : Window
             case "progress":
                 if (value.TryGetProperty("percent", out var percent) && percent.ValueKind == JsonValueKind.Number) _progress.Value = Math.Clamp(percent.GetDouble(),0,100);
                 var phase = value.TryGetProperty("phase",out var p) ? p.GetString() : "処理中";
-                _status.Text = value.TryGetProperty("eta",out var eta) && eta.ValueKind == JsonValueKind.Number ? $"{phase} — 残り約 {eta.GetDouble():F0} 秒" : phase;
+                _status.Text = value.TryGetProperty("eta",out var eta) && eta.ValueKind == JsonValueKind.Number ? $"{phase} — この工程は残り約 {TimeSpan.FromSeconds(Math.Clamp(eta.GetDouble(), 0, 864000)).ToString(@"hh\:mm\:ss", CultureInfo.InvariantCulture)}" : $"{phase} — 残り時間を計算中…";
                 break;
             case "file-done":
                 var filePath = value.GetProperty("inputPath").GetString();
@@ -304,9 +307,13 @@ public sealed class MainWindow : Window
     private void AppendLog(string text)
     {
         var line = $"[{DateTime.Now:HH:mm:ss}] {text}\n";
+        var scroller = _log.GetVisualDescendants().OfType<ScrollViewer>().FirstOrDefault();
+        var offset = scroller?.Offset ?? default;
+        var follow = scroller is null || scroller.Offset.Y >= scroller.Extent.Height - scroller.Viewport.Height - 4;
         var display = _log.Text + line;
         _log.Text = display.Length > 40000 ? display[^40000..] : display;
-        _log.CaretIndex = _log.Text.Length;
+        if (follow) _log.CaretIndex = _log.Text.Length;
+        else if (scroller is not null) Dispatcher.UIThread.Post(() => scroller.Offset = offset, DispatcherPriority.Background);
         try
         {
             var path = _runtime.LogPath;
@@ -325,7 +332,7 @@ public sealed class MainWindow : Window
     {
         public string Path { get; }
         public CheckBox Selected { get; } = new() { IsChecked = true };
-        public NumericUpDown Speed { get; } = new() { Minimum = 50, Maximum = 200, Value = 100, Width = 130 };
+        public NumericUpDown Speed { get; } = new() { Minimum = 50, Maximum = 200, Increment = 10, Value = 100, Width = 130 };
         public TextBlock Status { get; } = new() { Text = "未処理", VerticalAlignment = VerticalAlignment.Center };
         public Grid View { get; } = new() { ColumnDefinitions = new ColumnDefinitions("32,*,140,120"), ColumnSpacing = 8 };
         public FileRow(string path)

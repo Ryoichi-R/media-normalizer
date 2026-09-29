@@ -61,6 +61,7 @@ exit 6
             ProgressCurrent = 0
             ProgressTotal = 0
             CurrentPhase = $null
+            PhaseEtaSeconds = $null
             PhaseProgressPercent = -1.0
             CurrentFileElapsedSec = 0.0
         }
@@ -143,6 +144,7 @@ exit 6
             ProgressCurrent = 0
             ProgressTotal = 0
             CurrentPhase = $null
+            PhaseEtaSeconds = $null
             PhaseProgressPercent = -1.0
             CurrentFileElapsedSec = 0.0
         }
