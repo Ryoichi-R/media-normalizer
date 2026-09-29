@@ -1893,6 +1893,25 @@ function Get-NormalizationCurrentDuration {
     return -1.0
 }
 
+function Write-NormalizationProcessOutput {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Result,
+        [Parameter(Mandatory)][scriptblock]$Logger
+    )
+
+    foreach ($line in (($Result.StdoutText -replace "`r", "`n") -split "`n")) {
+        $clean = $line.Trim()
+        if ($clean) { & $Logger "  $clean" }
+    }
+    foreach ($line in (($Result.StderrText -replace "`r", "`n") -split "`n")) {
+        $clean = $line.Trim()
+        if ($clean -and -not ($clean -match '^(File:|Stream \d+/\d+:|Second Pass:)')) {
+            & $Logger "  $clean"
+        }
+    }
+}
+
 function Get-MediaNormalizerRuntimePreflight {
     [CmdletBinding()]
     param([bool]$AnalyzeOnly, [scriptblock]$Logger)
@@ -2466,16 +2485,7 @@ function Invoke-Normalize {
                             -TrackPhaseProgress $true `
                             -ProgressSpeedFactor ([double]$currentSpeedPercent / 100.0)
                         $exitCode = $normalizeResult.ExitCode
-                        foreach ($line in (($normalizeResult.StdoutText -replace "`r", "`n") -split "`n")) {
-                            $clean = $line.Trim()
-                            if ($clean) { & $Logger "  $clean" }
-                        }
-                        foreach ($line in (($normalizeResult.StderrText -replace "`r", "`n") -split "`n")) {
-                            $clean = $line.Trim()
-                            if ($clean -and -not ($clean -match '^(File:|Stream \d+/\d+:|Second Pass:)')) {
-                                & $Logger "  $clean"
-                            }
-                        }
+                        Write-NormalizationProcessOutput -Result $normalizeResult -Logger $Logger
                         if ($exitCode -ne 0 -or
                             -not (Test-Path -LiteralPath $workingOutPath -PathType Leaf)) {
                             throw "正規化に失敗しました (exit=$exitCode)"
