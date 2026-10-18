@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://media-normalizer.invalid/contracts/run-recovery.schema.json",
+  "title": "Media Normalizer CLI and GUI recovery record",
+  "type": "object",
+  "required": ["schemaVersion", "runId", "entrypoint", "status", "ownerProcessId", "startedAtUtc", "updatedAtUtc", "resultCode"],
+  "properties": {
+    "schemaVersion": { "enum": [1, 2] },
+    "runId": { "type": "string", "format": "uuid" },
+    "entrypoint": { "enum": ["cli", "gui"] },
+    "status": { "enum": ["running", "recovering", "completed", "recovery-required"] },
+    "ownerProcessId": { "type": "integer", "minimum": 1 },
+    "startedAtUtc": { "type": "string", "format": "date-time" },
+    "updatedAtUtc": { "type": "string", "format": "date-time" },
+    "resultCode": { "type": ["integer", "null"] },
+    "hostStartedAtUtc": { "type": "string", "format": "date-time" },
+    "workerProcessId": { "type": ["integer", "null"], "minimum": 1 },
+    "workerStartedAtUtc": { "type": ["string", "null"], "format": "date-time" },
+    "processes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["processId", "parentProcessId", "startedAtUtc"],
+        "properties": {
+          "processId": { "type": "integer", "minimum": 1 },
+          "parentProcessId": { "type": "integer", "minimum": 1 },
+          "startedAtUtc": { "type": "string", "format": "date-time" },
+          "processToken": { "type": ["string", "null"], "format": "uuid" },
+          "executablePath": { "type": ["string", "null"] }
+        },
+        "additionalProperties": false
+      }
+    },
+    "intermediatePaths": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "pendingProcessStarts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["processToken", "executablePath", "arguments", "parentProcessId", "parentStartedAtUtc"],
+        "properties": {
+          "processToken": { "type": "string", "format": "uuid" },
+          "executablePath": { "type": "string", "minLength": 1 },
+          "arguments": { "type": "array", "items": { "type": "string" } },
+          "parentProcessId": { "type": "integer", "minimum": 1 },
+          "parentStartedAtUtc": { "type": "string", "format": "date-time" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "recoveryMessage": { "type": ["string", "null"] }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "entrypoint": { "const": "cli" } }, "required": ["entrypoint"] },
+      "then": { "properties": { "schemaVersion": { "const": 1 } } }
+    },
+    {
+      "if": { "properties": { "entrypoint": { "const": "gui" } }, "required": ["entrypoint"] },
+      "then": {
+        "properties": { "schemaVersion": { "const": 2 } },
+        "required": ["hostStartedAtUtc", "workerProcessId", "workerStartedAtUtc", "processes", "intermediatePaths", "pendingProcessStarts", "recoveryMessage"]
+      }
+    }
+  ],
+  "additionalProperties": false
+}

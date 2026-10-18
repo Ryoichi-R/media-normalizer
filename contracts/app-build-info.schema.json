@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "appName",
+    "productVersion",
+    "sourceRevision",
+    "hasUncommittedChanges",
+    "builtAtUtc",
+    "targetRuntime"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "appName": {
+      "const": "Media Normalizer"
+    },
+    "productVersion": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)$"
+    },
+    "sourceRevision": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{12,64}$"
+    },
+    "hasUncommittedChanges": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "builtAtUtc": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "Z$"
+    },
+    "targetRuntime": {
+      "enum": [
+        "win-x64",
+        "win-arm64",
+        "osx-arm64"
+      ]
+    }
+  }
+}

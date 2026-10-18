@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 2,
+  "runId": "6f55000c-709c-40f0-9f76-ececf7a5e3ca",
+  "entrypoint": "gui",
+  "status": "running",
+  "ownerProcessId": 4242,
+  "startedAtUtc": "2026-09-27T00:00:00.0000000Z",
+  "updatedAtUtc": "2026-09-27T00:00:01.0000000Z",
+  "resultCode": null,
+  "hostStartedAtUtc": "2026-09-26T23:58:00.0000000Z",
+  "workerProcessId": 4243,
+  "workerStartedAtUtc": "2026-09-27T00:00:00.5000000Z",
+  "processes": [
+    {
+      "processId": 4244,
+      "parentProcessId": 4243,
+      "startedAtUtc": "2026-09-27T00:00:01.0000000Z",
+      "processToken": "aabbd447-9897-44d0-a52c-6dd393dab4ec",
+      "executablePath": "/bundle/runtime/ffmpeg/bin/ffmpeg"
+    }
+  ],
+  "intermediatePaths": [],
+  "pendingProcessStarts": [],
+  "recoveryMessage": null
+}

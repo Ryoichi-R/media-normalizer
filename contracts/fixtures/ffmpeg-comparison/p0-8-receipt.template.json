@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "fixtureSetId": "media-normalizer-p0-8-sample-v1",
+  "fixtureManifestSha256": "",
+  "systems": {
+    "windows": {
+      "osVersion": "",
+      "architecture": "",
+      "ffmpegPath": "",
+      "ffmpegSha256": "",
+      "ffmpegVersion": "",
+      "ffmpegBuildConfiguration": "",
+      "ffprobePath": "",
+      "ffprobeSha256": "",
+      "ffprobeVersion": "",
+      "ffprobeBuildConfiguration": "",
+      "reports": []
+    },
+    "macOS": {
+      "osVersion": "",
+      "architecture": "arm64",
+      "ffmpegPath": "",
+      "ffmpegSha256": "",
+      "ffmpegVersion": "",
+      "ffmpegBuildConfiguration": "",
+      "ffprobePath": "",
+      "ffprobeSha256": "",
+      "ffprobeVersion": "",
+      "ffprobeBuildConfiguration": "",
+      "reports": []
+    }
+  },
+  "reportContract": {
+    "schemaVersion": 2,
+    "exactMatch": [
+      "schemaVersion",
+      "configuration",
+      "summary counts",
+      "files field sets",
+      "files[*].action",
+      "stream counts and discrete validation fields",
+      "speed-change refusal outcome"
+    ],
+    "normalizeBeforeCompare": [
+      "generatedAt",
+      "files[*].inputPath",
+      "files[*].outputPath",
+      "files[*].startedAt",
+      "files[*].completedAt",
+      "files[*].before.Path",
+      "files[*].before.AnalyzedAt",
+      "files[*].after.Path",
+      "files[*].after.AnalyzedAt",
+      "absolute paths embedded in errors"
+    ],
+    "numericTolerances": [
+      {
+        "field": "files[*].before.Streams[*].IntegratedLufs",
+        "unit": "LUFS",
+        "absoluteTolerance": null,
+        "evidence": "Fill only after native Windows/macOS measurements."
+      },
+      {
+        "field": "files[*].before.Streams[*].TruePeakDbtp",
+        "unit": "dBTP",
+        "absoluteTolerance": null,
+        "evidence": "Fill only after native Windows/macOS measurements."
+      },
+      {
+        "field": "files[*].before.Streams[*].LoudnessRangeLu",
+        "unit": "LU",
+        "absoluteTolerance": null,
+        "evidence": "Fill only after native Windows/macOS measurements."
+      },
+      {
+        "field": "files[*].before.Streams[*].Threshold",
+        "unit": "LUFS",
+        "absoluteTolerance": null,
+        "evidence": "Record whether this value is compared numerically or exactly after empirical review."
+      }
+    ]
+  },
+  "result": "PENDING",
+  "notes": "This is a blank receipt template. Do not invent tolerance values or mark P0-8 complete before both pinned binaries have processed the verified identical fixture corpus."
+}

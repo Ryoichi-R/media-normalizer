@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Media Normalizer GUI activation",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "instanceId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "command": {
+          "const": "activate"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "instanceId",
+        "id",
+        "command"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "instanceId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "status": {
+          "const": "activated"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "instanceId",
+        "id",
+        "status"
+      ]
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "instanceId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "pipeName": {
+          "type": "string",
+          "pattern": "^mn-[A-F0-9]{16}-[a-f0-9]{8}$"
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "instanceId",
+        "pipeName"
+      ]
+    }
+  ]
+}

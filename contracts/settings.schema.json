@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://media-normalizer.invalid/contracts/settings.schema.json",
+  "title": "Media Normalizer user settings",
+  "description": "Schema 2 persisted settings. Missing known properties remain backward compatible. Additive extension properties are preserved when a schema-compatible settings file is read and saved.",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 2
+    },
+    "inputDir": {
+      "type": ["string", "null"],
+      "default": ""
+    },
+    "outputDir": {
+      "type": ["string", "null"],
+      "default": ""
+    },
+    "lastPreset": {
+      "type": ["string", "null"],
+      "default": "デフォルト"
+    },
+    "lastMode": {
+      "type": ["string", "null"],
+      "enum": ["audio", "video", "both", null],
+      "default": "audio"
+    }
+  },
+  "additionalProperties": true
+}

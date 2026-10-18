@@ -1,0 +1,13 @@
+<Project>
+  <PropertyGroup>
+    <Version>1.1.0</Version>
+    <Product>Media Normalizer</Product>
+    <InformationalVersion>$(Version)</InformationalVersion>
+    <AssemblyVersion>$(Version).0</AssemblyVersion>
+    <FileVersion>$(Version).0</FileVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <AnalysisMode>Recommended</AnalysisMode>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+</Project>
