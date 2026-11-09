@@ -20,8 +20,14 @@ public sealed class MainWindow : Window
     private readonly SettingsReadResult _saved;
     private readonly TextBox _input = new() { Watermark = "入力フォルダ（またはファイルを追加）" };
     private readonly TextBox _output = new() { Watermark = "出力フォルダ" };
-    private readonly ComboBox _mode = new() { ItemsSource = new[] { "audio", "video", "both" }, SelectedIndex = 0, MinWidth = 110 };
-    private readonly ComboBox _format = new() { MinWidth = 90 };
+    private readonly ComboBox _format = new() { MinWidth = 240 };
+    private readonly StackPanel _migrationNotice = new() { IsVisible = false, Spacing = 6 };
+    private string[] _outputSelections = [];
+    private string[] _scanPaths = [];
+    private string? _scanRoot;
+    private string? _scanStatus;
+    private string? _lastMode;
+    private bool _migrationPending;
     private readonly ComboBox _presets = new() { MinWidth = 250 };
     private readonly NumericUpDown _target = new() { Minimum = -70, Maximum = -5, Value = -16, Width = 140 };
     private readonly NumericUpDown _peak = new() { Minimum = -9, Maximum = 0, Value = -1, Width = 130 };
@@ -65,7 +71,8 @@ public sealed class MainWindow : Window
         Icon = new WindowIcon(Avalonia.Platform.AssetLoader.Open(new Uri("avares://MediaNormalizer.Gui/Assets/media-normalizer-icon.png")));
         Title = "Media Normalizer"; Width = 1180; Height = 830; MinWidth = 1100; MinHeight = 650;
         _input.Text = _saved.Values.InputDir; _output.Text = _saved.Values.OutputDir;
-        _mode.SelectedItem = _saved.Values.LastMode ?? "audio";
+        _lastMode = _saved.SavedLastMode;
+        _migrationPending = _saved.RequiresOutputMigration;
         var files = new Button { Content = "ファイル追加" };
         var folder = new Button { Content = "入力フォルダ" };
         var output = new Button { Content = "出力先" };
@@ -76,7 +83,8 @@ public sealed class MainWindow : Window
         clear.Click += (_, _) => { _paths.Clear(); _input.Text = ""; _rows.Clear(); _rowState.Clear(); _rowsPanel.Children.Clear(); InvalidateScan(); };
         _options.Children.Add(Line(files, folder, output, clear));
         _options.Children.Add(_input); _options.Children.Add(_output);
-        _options.Children.Add(Line(Label("モード"), _mode, Label("プリセット"), _presets, Label("音声形式"), _format));
+        _options.Children.Add(Line(Label("プリセット"), _presets, Label("出力形式"), _format));
+        _options.Children.Add(_migrationNotice);
         _options.Children.Add(Line(Label("目標 LUFS"), _target, Label("上限 dBTP"), _peak, Label("速度 %"), _speed, Label("同名出力"), _collision));
         _options.Children.Add(Line(_analyze, _recurse, _hierarchy, _skip));
         _options.Children.Add(_basis);
@@ -104,7 +112,7 @@ public sealed class MainWindow : Window
         _run.Click += async (_, _) => { try { await NormalizeAsync(); } catch (Exception exception) { AppendLog(exception.Message); _status.Text = "入力内容をご確認ください。"; } };
         _cancel.Click += (_, _) => { _cancelSource?.Cancel(); _status.Text = "キャンセル・回収完了を待っています…"; _cancel.IsEnabled = false; };
         _input.TextChanged += (_, _) => InvalidateScan(); _output.TextChanged += (_, _) => InvalidateScan();
-        _mode.SelectionChanged += (_, _) => InvalidateScan(); _format.SelectionChanged += (_, _) => InvalidateScan();
+        _format.SelectionChanged += (_, _) => InvalidateScan();
         _collision.SelectionChanged += (_, _) => InvalidateScan();
         _presets.SelectionChanged += (_, _) => ApplyPreset();
         foreach (var box in new[] { _analyze, _recurse, _hierarchy, _skip }) box.IsCheckedChanged += (_, _) => InvalidateScan();
@@ -140,7 +148,10 @@ public sealed class MainWindow : Window
     {
         _options.IsEnabled = _ready && !_busy && !_blocked;
         _scan.IsEnabled = _ready && !_busy && !_blocked;
-        _run.IsEnabled = _ready && !_busy && !_blocked && _scanned && _rows.Any(r => r.Selected.IsChecked == true) && !string.IsNullOrWhiteSpace(_output.Text);
+        var selected = _rows.Where(r => r.IsSelected).ToArray();
+        if (_scanned) UpdateRowWarnings(selected);
+        _run.IsEnabled = _ready && !_busy && !_blocked && _scanned && selected.Length > 0 &&
+            selected.All(r => !r.SpeedBlocked) && !string.IsNullOrWhiteSpace(_output.Text);
         _cancel.IsEnabled = _busy;
         _rowsPanel.IsEnabled = !_busy;
     }
@@ -160,11 +171,17 @@ public sealed class MainWindow : Window
             _presets.ItemsSource = _presetValues.Select(p => p.GetProperty("name").GetString()).ToArray();
             var index = _presetValues.FindIndex(p => p.GetProperty("name").GetString() == _saved.Values.LastPreset);
             _presets.SelectedIndex = Math.Max(0, index);
-            var result = await ExecuteAsync(new Dictionary<string, object?> { ["cmd"] = "capabilities" });
-            if (result.ExitCode != 0 || result.RecoveryRequired) throw new InvalidOperationException("ワーカーを初期化できません。");
+            var result = await ExecuteAsync(new Dictionary<string, object?> { ["cmd"] = "capabilities", ["outputSelectionProtocol"] = true });
+            if (result.RecoveryRequired) throw new InvalidOperationException("ワーカーの復旧が必要です。");
+            if (result.ExitCode != 0 || !_outputSelections.Contains("auto", StringComparer.Ordinal) ||
+                !_outputSelections.Contains("mp3", StringComparer.Ordinal) || !_outputSelections.Contains("mp4", StringComparer.Ordinal) ||
+                !_outputSelections.Contains("original-video", StringComparer.Ordinal) || !_outputSelections.Contains("audio-and-video", StringComparer.Ordinal))
+                throw new InvalidOperationException("アプリとワーカーのバージョンが一致しません。");
             _ready = true; _status.Text = "入力を選び、確認を押してください。";
             foreach (var warning in _saved.Warnings) AppendLog(warning);
             ApplyPreset();
+            SelectOutput(_saved.Values.LastOutputSelection ?? "auto");
+            if (_migrationPending) ShowMigrationNotice();
         }
         catch (Exception exception) { _blocked = true; _status.Text = "起動できません: " + exception.Message; AppendLog(exception.Message); }
         finally { _busy = false; RefreshButtons(); if (_closeAfterRun) Close(); }
@@ -174,17 +191,86 @@ public sealed class MainWindow : Window
         if (_presets.SelectedIndex < 0 || _presets.SelectedIndex >= _presetValues.Count) return;
         var preset = _presetValues[_presets.SelectedIndex];
         _target.Value = preset.GetProperty("target").GetDecimal(); _peak.Value = preset.GetProperty("truePeak").GetDecimal();
-        _format.SelectedItem = preset.GetProperty("outputFormat").GetString();
+        var selection = SelectedOutput;
+        _format.ItemsSource = _outputSelections.Select(value => new OutputOption(value, OutputLabel(value))).ToArray();
+        SelectOutput(selection);
         InvalidateScan();
     }
     private void UpdatePresetDescription()
     {
         if (_presets.SelectedIndex < 0 || _presets.SelectedIndex >= _presetValues.Count) return;
         var preset = _presetValues[_presets.SelectedIndex];
-        var matches = _target.Value == preset.GetProperty("target").GetDecimal() && _peak.Value == preset.GetProperty("truePeak").GetDecimal() && Equals(_format.SelectedItem,preset.GetProperty("outputFormat").GetString());
+        var matches = _target.Value == preset.GetProperty("target").GetDecimal() && _peak.Value == preset.GetProperty("truePeak").GetDecimal();
         _basis.Text = string.Join("\n", PresetDescriptionFields.Select(k => preset.GetProperty(k).GetString())) +
             (matches ? "\n現在値はプリセットと一致しています。" : "\n現在値はプリセットから変更されています。");
     }
+    private string SelectedOutput => (_format.SelectedItem as OutputOption)?.Value ?? "auto";
+
+    private string PresetAudioFormat => _presets.SelectedIndex >= 0 && _presets.SelectedIndex < _presetValues.Count
+        ? _presetValues[_presets.SelectedIndex].GetProperty("outputFormat").GetString() ?? "mp3"
+        : "mp3";
+
+    private string OutputLabel(string value) => value switch
+    {
+        "auto" => $"自動（動画は元の形式／音声は {PresetAudioFormat.ToUpperInvariant()}）",
+        "original-video" => "元の動画形式",
+        "audio-and-video" => $"音声（{PresetAudioFormat.ToUpperInvariant()}）＋元の動画形式",
+        _ => value.ToUpperInvariant()
+    };
+
+    private void SelectOutput(string value)
+    {
+        var options = _format.Items.OfType<OutputOption>().ToArray();
+        _format.SelectedItem = options.FirstOrDefault(option => option.Value == value) ??
+            options.FirstOrDefault(option => option.Value == "auto");
+    }
+
+    private void ShowMigrationNotice()
+    {
+        var prior = _lastMode switch
+        {
+            "video" => "original-video",
+            "both" => "audio-and-video",
+            _ => PresetAudioFormat
+        };
+        var keep = new Button { Content = "確認" };
+        var restore = new Button { Content = "以前の設定に戻す" };
+        keep.Click += (_, _) => AcknowledgeMigration();
+        restore.Click += (_, _) => { SelectOutput(prior); AcknowledgeMigration(); };
+        _migrationNotice.Children.Add(new TextBlock
+        {
+            Text = $"出力形式を「自動」に切り替えました。動画は元の形式、音声はプリセット形式で出力します。AVIは音声出力です。以前の設定に相当する形式は「{OutputLabel(prior)}」です。",
+            TextWrapping = Avalonia.Media.TextWrapping.Wrap
+        });
+        _migrationNotice.Children.Add(Line(keep, restore));
+        _migrationNotice.IsVisible = true;
+    }
+
+    private void AcknowledgeMigration()
+    {
+        if (!SaveSettings(confirmMigration: true)) return;
+        _migrationPending = false;
+        _migrationNotice.IsVisible = false;
+    }
+
+    private void UpdateRowWarnings(FileRow[] selected)
+    {
+        var duplicates = selected.SelectMany(row => row.Destinations)
+            .GroupBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Count() > 1).Select(group => group.Key)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in _rows)
+        {
+            var warnings = new List<string>();
+            if (row.Reason is not null) warnings.Add(row.Reason);
+            if (row.Warning is not null && row.Warning != row.Reason) warnings.Add(row.Warning);
+            if (row.SpeedBlocked && row.SpeedReason is not null) warnings.Add(row.SpeedReason);
+            if (row.IsSelected && row.Destinations.Any(duplicates.Contains))
+                warnings.Add("選択行どうしで出力予定名が重複しています。");
+            row.Details.Text = warnings.Count == 0 ? row.RouteLabel : $"{row.RouteLabel} — {string.Join(" ", warnings)}";
+        }
+    }
+
     private async Task AddFilesAsync()
     {
         var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions { AllowMultiple = true, Title = "入力メディア" });
@@ -197,30 +283,47 @@ public sealed class MainWindow : Window
         var paths = _paths.ToList();
         if (!string.IsNullOrWhiteSpace(_input.Text)) paths.Add(_input.Text.Trim());
         if (paths.Count == 0) { _status.Text = "入力ファイルまたはフォルダを指定してください。"; return; }
-        foreach (var row in _rows) _rowState[row.Path] = (row.Selected.IsChecked == true, row.Speed.Value);
+        foreach (var row in _rows.Where(row => row.Reason is null))
+            _rowState[row.Path] = (row.IsSelected, row.Speed.Value);
         _rows.Clear(); _rowsPanel.Children.Clear(); _scanned = false;
+        _scanRoot = null; _scanStatus = null;
+        _scanPaths = paths.Distinct(StringComparer.Ordinal).ToArray();
         await WithBusyAsync(async () =>
         {
             _status.Text = "ファイルを確認中…";
-            var result = await ExecuteAsync(new Dictionary<string, object?> { ["cmd"] = "scan", ["paths"] = paths.Distinct(StringComparer.Ordinal).ToArray(), ["mode"] = _mode.SelectedItem, ["recurse"] = _recurse.IsChecked == true });
-            _scanned = result.ExitCode == 0 && !result.RecoveryRequired;
+            var result = await ExecuteAsync(new Dictionary<string, object?>
+            {
+                ["cmd"] = "scan", ["paths"] = _scanPaths, ["outputSelection"] = SelectedOutput,
+                ["audioOutputFormat"] = PresetAudioFormat, ["outputDir"] = _output.Text?.Trim() ?? "",
+                ["analyzeOnly"] = _analyze.IsChecked == true, ["recurse"] = _recurse.IsChecked == true,
+                ["preserveHierarchy"] = _hierarchy.IsChecked == true, ["collisionPolicy"] = _collision.SelectedItem
+            });
+            _scanned = result.ExitCode == 0 && !result.RecoveryRequired && _scanStatus == "completed" &&
+                _cancelSource?.IsCancellationRequested != true;
             if (_scanned) _previousScanSpeed = _speed.Value;
-            if (!_blocked) _status.Text = _scanned ? $"{_rows.Count} 件を確認しました。設定を確認して実行してください。" : "確認に失敗しました。ログをご確認ください。";
+            else { _rows.Clear(); _rowsPanel.Children.Clear(); }
+            if (!_blocked)
+                _status.Text = _scanned ? $"{_rows.Count} 件を確認しました（対象 {_rows.Count(row => row.Reason is null)} 件）。"
+                    : _scanStatus == "cancelled" || _cancelSource?.IsCancellationRequested == true
+                        ? "スキャンをキャンセルしました。" : "確認に失敗しました。ログをご確認ください。";
         });
     }
     private async Task NormalizeAsync()
     {
         if (!_run.IsEnabled) return;
-        if (!await ConfirmAsync()) return;
-        var selected = _rows.Where(r => r.Selected.IsChecked == true).ToArray();
+        if (!await ConfirmAsync() || !_run.IsEnabled) return;
+        var selected = _rows.Where(r => r.IsSelected).ToArray();
         var preset = _presetValues[_presets.SelectedIndex];
         var output = Path.GetFullPath(_output.Text!.Trim());
         var command = new Dictionary<string, object?>
         {
             ["cmd"] = "normalize", ["inputPaths"] = selected.Select(r => r.Path).ToArray(), ["outputDir"] = output,
-            ["mode"] = _mode.SelectedItem, ["target"] = (double)(_target.Value ?? -16), ["truePeak"] = (double)(_peak.Value ?? -1),
+            ["outputSelection"] = SelectedOutput, ["inputRoot"] = _scanRoot, ["scanPaths"] = _scanPaths,
+            ["protectedInputs"] = _rows.Select(row => row.Path).ToArray(),
+            ["plannedFiles"] = selected.Select(row => new { path = row.Path, formats = row.Formats, size = row.Size, modifiedTicks = row.ModifiedTicks }).ToArray(),
+            ["target"] = (double)(_target.Value ?? -16), ["truePeak"] = (double)(_peak.Value ?? -1),
             ["bitrate"] = preset.GetProperty("bitrate").GetString(), ["sampleRate"] = preset.GetProperty("sampleRate").GetInt32().ToString(CultureInfo.InvariantCulture),
-            ["audioOutputFormat"] = _format.SelectedItem, ["speedPercent"] = (int)(_speed.Value ?? 100),
+            ["audioOutputFormat"] = PresetAudioFormat, ["speedPercent"] = (int)(_speed.Value ?? 100),
             ["speedPercentByPath"] = selected.ToDictionary(r => r.Path, r => (int)(r.Speed.Value ?? 100), StringComparer.Ordinal),
             ["collisionPolicy"] = _collision.SelectedItem, ["analyzeOnly"] = _analyze.IsChecked == true,
             ["skipIfNormalized"] = _skip.IsChecked == true, ["normalizationTolerance"] = 0.5,
@@ -242,8 +345,13 @@ public sealed class MainWindow : Window
         var dialog = new Window { Title = "実行内容の確認", Width = 540, Height = 280, CanResize = false, WindowStartupLocation = WindowStartupLocation.CenterOwner };
         var yes = new Button { Content = "この内容で実行" }; var no = new Button { Content = "戻る" };
         yes.Click += (_, _) => dialog.Close(true); no.Click += (_, _) => dialog.Close(false);
+        var selected = _rows.Where(row => row.IsSelected).ToArray();
+        var summary = _analyze.IsChecked == true ? $"解析対象 {selected.Length} 件" :
+            string.Join(" / ", selected.SelectMany(row => row.Formats)
+                .GroupBy(format => format, StringComparer.Ordinal)
+                .Select(group => $"{group.Key.ToUpperInvariant()} {group.Count()} 件"));
         dialog.Content = new StackPanel { Margin = new Thickness(20), Spacing = 18, Children = {
-            new TextBlock { Text = $"{_rows.Count(r => r.Selected.IsChecked == true)} 件 / {_mode.SelectedItem} / {_format.SelectedItem}\n目標 {_target.Value} LUFS・上限 {_peak.Value} dBTP・速度 {_speed.Value}%\n解析のみ: {_analyze.IsChecked == true}\n同名出力: {_collision.SelectedItem}\n出力: {_output.Text}", TextWrapping = Avalonia.Media.TextWrapping.Wrap }, Line(yes,no) } };
+            new TextBlock { Text = $"{summary}\n目標 {_target.Value} LUFS・上限 {_peak.Value} dBTP\n同名出力: {_collision.SelectedItem}\n出力先: {_output.Text}", TextWrapping = Avalonia.Media.TextWrapping.Wrap }, Line(yes,no) } };
         return await dialog.ShowDialog<bool>(this);
     }
     private async Task WithBusyAsync(Func<Task> action)
@@ -289,18 +397,25 @@ public sealed class MainWindow : Window
         var type = value.GetProperty("type").GetString();
         switch (type)
         {
-            case "capabilities-result": _format.ItemsSource = value.GetProperty("audioOutputFormats").EnumerateArray().Select(e => e.GetString()).ToArray(); break;
+            case "capabilities-result":
+                if (value.TryGetProperty("outputSelections", out var selections))
+                    _outputSelections = selections.EnumerateArray().Select(item => item.GetString()!).ToArray();
+                break;
             case "scan-result":
+                _scanStatus = value.GetProperty("status").GetString();
+                _scanRoot = value.GetProperty("inputRoot").GetString();
+                if (_scanStatus != "completed") break;
                 foreach (var item in value.GetProperty("files").EnumerateArray())
                 {
-                    var path = item.GetProperty("path").GetString()!;
-                    var row = new FileRow(path); row.Speed.Value = _speed.Value;
-                    if (_rowState.TryGetValue(path,out var previous))
+                    var row = new FileRow(item, _analyze.IsChecked == true);
+                    row.Speed.Value = _speed.Value;
+                    if (row.Reason is null && _rowState.TryGetValue(row.Path, out var previous))
                     {
                         row.Selected.IsChecked = previous.Selected;
                         if (_previousScanSpeed == _speed.Value) row.Speed.Value = previous.Speed;
                     }
                     row.Selected.IsCheckedChanged += (_, _) => RefreshButtons();
+                    row.Speed.ValueChanged += (_, _) => RefreshButtons();
                     _rows.Add(row); _rowsPanel.Children.Add(row.View);
                 }
                 break;
@@ -311,7 +426,12 @@ public sealed class MainWindow : Window
                 break;
             case "file-done":
                 var filePath = value.GetProperty("inputPath").GetString();
-                foreach (var row in _rows.Where(r => r.Path == filePath)) row.Status.Text = value.GetProperty("status").GetString();
+                foreach (var row in _rows.Where(r => r.Path == filePath))
+                {
+                    var status = value.GetProperty("status").GetString();
+                    if (row.Status.Text != "failed" || status == "failed") row.Status.Text = status;
+                    if (value.GetProperty("message").GetString() is { } reason) ToolTip.SetTip(row.Status, reason);
+                }
                 break;
             case "error": case "log":
                 if (value.TryGetProperty("message",out var message)) AppendLog(message.GetString() ?? "");
@@ -337,23 +457,87 @@ public sealed class MainWindow : Window
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { _status.Text = "ログの保存に失敗しました。画面内のログをご確認ください。"; }
     }
-    private void SaveSettings()
+    private bool SaveSettings(bool confirmMigration = false)
     {
-        try { _settings.Save(new SettingsValues(_input.Text, _output.Text, _presets.SelectedItem as string ?? _saved.Values.LastPreset, _mode.SelectedItem as string), _saved.ExtensionFields); }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException) { AppendLog("設定を保存できません: " + exception.Message); }
+        if (!_ready) return false;
+        var selection = _migrationPending && !confirmMigration ? null : SelectedOutput;
+        var mode = selection switch
+        {
+            "original-video" => "video",
+            "audio-and-video" => "both",
+            "mp3" or "m4a" or "aac" or "flac" or "wav" or "opus" or "ogg" => "audio",
+            _ => _lastMode
+        };
+        try
+        {
+            _settings.Save(new SettingsValues(_input.Text, _output.Text,
+                _presets.SelectedItem as string ?? _saved.Values.LastPreset, mode, selection), _saved.ExtensionFields);
+            _lastMode = mode;
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            AppendLog("設定を保存できません: " + exception.Message);
+            return false;
+        }
     }
+
+    private sealed record OutputOption(string Value, string Label)
+    {
+        public override string ToString() => Label;
+    }
+
     private sealed class FileRow
     {
         public string Path { get; }
-        public CheckBox Selected { get; } = new() { IsChecked = true };
+        public string[] Formats { get; }
+        public string[] Destinations { get; }
+        public string? Reason { get; }
+        public string? Warning { get; }
+        public string? SpeedReason { get; }
+        public long Size { get; }
+        public long ModifiedTicks { get; }
+        public string RouteLabel { get; }
+        public bool IsSelected => Reason is null && Selected.IsChecked == true;
+        public bool SpeedBlocked => SpeedReason is not null && (Speed.Value ?? 100) != 100;
+        public CheckBox Selected { get; } = new();
         public NumericUpDown Speed { get; } = new() { Minimum = 50, Maximum = 200, Increment = 10, Value = 100, Width = 130 };
         public TextBlock Status { get; } = new() { Text = "未処理", VerticalAlignment = VerticalAlignment.Center };
+        public TextBlock Details { get; } = new() { TextWrapping = Avalonia.Media.TextWrapping.Wrap };
         public Grid View { get; } = new() { ColumnDefinitions = new ColumnDefinitions("32,*,140,120"), ColumnSpacing = 8 };
-        public FileRow(string path)
+
+        public FileRow(JsonElement item, bool analyze)
         {
-            Path = path; View.Children.Add(Selected);
-            var name = Label(System.IO.Path.GetFileName(path)); name.TextTrimming = Avalonia.Media.TextTrimming.CharacterEllipsis; ToolTip.SetTip(name,path);
-            Grid.SetColumn(name,1); View.Children.Add(name); Grid.SetColumn(Speed,2); View.Children.Add(Speed); Grid.SetColumn(Status,3); View.Children.Add(Status);
+            Path = item.GetProperty("path").GetString()!;
+            Formats = item.GetProperty("formats").EnumerateArray().Select(value => value.GetString()!).ToArray();
+            Destinations = item.GetProperty("destinations").EnumerateArray().Select(value => value.GetString()!).ToArray();
+            Reason = item.GetProperty("reason").GetString();
+            Warning = item.GetProperty("warning").GetString();
+            SpeedReason = item.GetProperty("speedReason").GetString();
+            Size = item.GetProperty("size").GetInt64();
+            ModifiedTicks = item.GetProperty("modifiedTicks").GetInt64();
+            var kind = item.GetProperty("kind").GetString() switch
+            {
+                "video" => "映像＋音声",
+                "audio" => "音声のみ",
+                "no-audio" => "音声なし",
+                _ => "判定不能"
+            };
+            RouteLabel = Reason is not null ? kind : analyze ? $"{kind} → 解析" :
+                $"{kind} → {string.Join(" ＋ ", Formats.Select(format => format.ToUpperInvariant()))}";
+            Selected.IsEnabled = Reason is null;
+            Selected.IsChecked = Reason is null;
+            Speed.IsEnabled = Reason is null && !analyze;
+            Details.Text = Reason is null ? RouteLabel : $"{RouteLabel} — {Reason}";
+            ToolTip.SetTip(Details, Destinations.Length == 0 ? null : string.Join(Environment.NewLine, Destinations));
+            var name = Label(System.IO.Path.GetFileName(Path));
+            name.TextTrimming = Avalonia.Media.TextTrimming.CharacterEllipsis;
+            ToolTip.SetTip(name, Path);
+            var description = new StackPanel { Children = { name, Details } };
+            View.Children.Add(Selected);
+            Grid.SetColumn(description, 1); View.Children.Add(description);
+            Grid.SetColumn(Speed, 2); View.Children.Add(Speed);
+            Grid.SetColumn(Status, 3); View.Children.Add(Status);
         }
     }
 }

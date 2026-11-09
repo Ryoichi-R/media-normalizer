@@ -35,6 +35,16 @@ try
     Require(JsonEquivalent(actual.RootElement.GetProperty("extensionState"), expected.RootElement.GetProperty("extensionState")),
         "Nested extension field changed during round-trip.");
 
+    Require(extensionResult.RequiresOutputMigration && extensionResult.SavedLastMode == "video",
+        "A valid legacy mode requires explicit output migration.");
+    roundTripStore.Save(editedValues with { LastOutputSelection = "mp3" }, extensionResult.ExtensionFields);
+    var confirmed = roundTripStore.Read();
+    Require(!confirmed.RequiresOutputMigration && confirmed.Values.LastOutputSelection == "mp3",
+        "A saved output selection ends migration and survives restart.");
+    File.WriteAllText(roundTripPath, """{"version":2,"lastMode":"video","lastOutputSelection":17}""");
+    var invalidOutput = roundTripStore.Read();
+    Require(!invalidOutput.RequiresOutputMigration && invalidOutput.Values.LastOutputSelection == "auto" && invalidOutput.Warnings.Count == 1,
+        "An invalid output selection uses auto and emits a warning.");
     var futureResult = new SettingsStore(Path.Combine(fixtureRoot, "settings-v99-future.json")).Read(defaults);
     Require(futureResult.Values == defaults && futureResult.ExtensionFields.Count == 0 && futureResult.Warnings.Count == 1,
         "Future schema fallback did not match the PowerShell contract.");
@@ -57,7 +67,7 @@ try
 
     var missingPath = Path.Combine(temporaryRoot, "missing", "settings.json");
     var missingResult = new SettingsStore(missingPath).Read(defaults);
-    Require(missingResult.Values == defaults && missingResult.Warnings.Count == 0,
+    Require(missingResult.Values == defaults && missingResult.Warnings.Count == 0 && !missingResult.RequiresOutputMigration,
         "Missing-file defaults did not match the PowerShell contract.");
 
     var defaultPath = SettingsStore.GetDefaultSettingsPath();

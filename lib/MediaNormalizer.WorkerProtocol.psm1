@@ -1,4 +1,38 @@
 Set-StrictMode -Version Latest
+$script:WorkerAudioFormats = @('mp3', 'm4a', 'aac', 'flac', 'wav', 'opus', 'ogg')
+$script:WorkerOutputSelections = @('auto', 'mp4', 'original-video', 'audio-and-video') + $script:WorkerAudioFormats
+$script:WorkerOutputFormats = @('mp4', 'mov', 'mkv') + $script:WorkerAudioFormats
+
+function Get-MediaNormalizerOutputSelections { $script:WorkerOutputSelections }
+
+function Test-MediaNormalizerWorkerPathList {
+    param($Value, [switch]$AllowEmpty)
+    return (Test-MediaNormalizerWorkerArray $Value) -and ($AllowEmpty -or $Value.Count -gt 0) -and
+        @($Value | Where-Object { -not (Test-MediaNormalizerWorkerString $_) }).Count -eq 0
+}
+
+function Test-MediaNormalizerWorkerOutputRow {
+    param($File, [switch]$Scan)
+    $fields = @('path', 'formats', 'size', 'modifiedTicks')
+    if ($Scan) { $fields += @('kind', 'duration', 'reason', 'speedReason', 'warning', 'destinations') }
+    if ($File -isnot [Collections.IDictionary] -or $File.Count -ne $fields.Count -or
+        @($fields | Where-Object { -not $File.Contains($_) }).Count -gt 0) { return $false }
+    if (-not (Test-MediaNormalizerWorkerString $File.path) -or
+        -not (Test-MediaNormalizerWorkerArray $File.formats) -or $File.formats.Count -gt 2 -or
+        @($File.formats | Where-Object { -not (Test-MediaNormalizerWorkerEnum $_ $script:WorkerOutputFormats) }).Count -gt 0) {
+        return $false
+    }
+    foreach ($key in @('size', 'modifiedTicks')) {
+        if (-not (Test-MediaNormalizerWorkerNumber $File[$key] -Integer) -or [double]$File[$key] -lt 0) { return $false }
+    }
+    if (-not $Scan) { return $true }
+    foreach ($key in @('reason', 'speedReason', 'warning')) {
+        if ($null -ne $File[$key] -and -not (Test-MediaNormalizerWorkerString $File[$key])) { return $false }
+    }
+    return (Test-MediaNormalizerWorkerEnum $File.kind @('audio', 'video', 'no-audio', 'unknown')) -and
+        (Test-MediaNormalizerWorkerNumber $File.duration) -and [double]$File.duration -ge 0 -and
+        (Test-MediaNormalizerWorkerPathList $File.destinations -AllowEmpty)
+}
 
 function ConvertTo-MediaNormalizerWorkerHashtable {
     param([Parameter(Mandatory)][object]$Message)
@@ -99,11 +133,22 @@ function Test-MediaNormalizerWorkerMessage {
     if ($Kind -eq 'Command') {
         $name = [string]$data.cmd
         $idRequired = @('schemaVersion', 'id', 'cmd')
+        $planned = $data.Contains('outputSelection')
         switch ($name) {
-            'capabilities' { $required = $idRequired; $allowed = $idRequired }
-            'scan' { $required = $idRequired + @('paths', 'mode', 'recurse'); $allowed = $required }
+            'capabilities' { $required = $idRequired; $allowed = $idRequired + @('outputSelectionProtocol') }
+            'scan' {
+                $required = $idRequired + @('paths', 'recurse')
+                $required += if ($planned) {
+                    @('outputSelection', 'runId', 'audioOutputFormat', 'analyzeOnly', 'outputDir', 'preserveHierarchy', 'collisionPolicy')
+                } else { 'mode' }
+                $allowed = $required
+            }
             'normalize' {
                 $required = $idRequired + @('runId', 'inputPaths', 'outputDir', 'mode', 'target', 'truePeak', 'bitrate', 'sampleRate', 'collisionPolicy', 'speedPercent', 'audioOutputFormat', 'analyzeOnly', 'skipIfNormalized', 'normalizationTolerance', 'recurse', 'preserveHierarchy')
+                if ($planned) {
+                    $required = @($required | Where-Object { $_ -ne 'mode' }) +
+                        @('outputSelection', 'inputRoot', 'scanPaths', 'protectedInputs', 'plannedFiles')
+                }
                 $allowed = $required + @('speedPercentByPath', 'reportPath')
             }
             'cancel' { $required = $idRequired + @('runId'); $allowed = $required }
@@ -125,11 +170,26 @@ function Test-MediaNormalizerWorkerMessage {
                     $paths = @($data[$pathKey])
                     if ($paths.Count -lt 1 -or @($paths | Where-Object { -not (Test-MediaNormalizerWorkerString $_) }).Count -gt 0) { $errors.Add("$pathKey must contain non-empty strings") }
                 }
-                if (-not (Test-MediaNormalizerWorkerEnum $data.mode @('audio', 'video', 'both'))) { $errors.Add('mode is invalid') }
+                if ($planned) {
+                    if (-not (Test-MediaNormalizerWorkerEnum $data.outputSelection $script:WorkerOutputSelections)) { $errors.Add('outputSelection is invalid') }
+                } elseif (-not (Test-MediaNormalizerWorkerEnum $data.mode @('audio', 'video', 'both'))) { $errors.Add('mode is invalid') }
             }
         }
         switch ($name) {
-            'scan' { if (-not (Test-MediaNormalizerWorkerBoolean $data.recurse)) { $errors.Add('recurse must be boolean') } }
+            'capabilities' {
+                if ($data.Contains('outputSelectionProtocol') -and $data.outputSelectionProtocol -isnot [bool]) { $errors.Add('outputSelectionProtocol must be boolean') }
+            }
+            'scan' {
+                if (-not (Test-MediaNormalizerWorkerBoolean $data.recurse)) { $errors.Add('recurse must be boolean') }
+                if ($planned -and (-not (Test-MediaNormalizerWorkerGuid $data.runId) -or
+                    -not (Test-MediaNormalizerWorkerString $data.outputDir -AllowEmpty) -or
+                    -not (Test-MediaNormalizerWorkerBoolean $data.analyzeOnly) -or
+                    -not (Test-MediaNormalizerWorkerBoolean $data.preserveHierarchy) -or
+                    -not (Test-MediaNormalizerWorkerEnum $data.collisionPolicy @('rename', 'skip', 'overwrite')) -or
+                    -not (Test-MediaNormalizerWorkerEnum $data.audioOutputFormat $script:WorkerAudioFormats))) {
+                    $errors.Add('planned scan fields are invalid')
+                }
+            }
             'normalize' {
                 if (-not (Test-MediaNormalizerWorkerGuid $data['runId'])) { $errors.Add('runId must be a UUID') }
                 if (-not (Test-MediaNormalizerWorkerString $data.outputDir)) { $errors.Add('outputDir must be a non-empty string') }
@@ -147,6 +207,14 @@ function Test-MediaNormalizerWorkerMessage {
                     if (-not (Test-MediaNormalizerWorkerString $data[$stringName])) { $errors.Add("$stringName must be a non-empty string") }
                 }
                 if ($data.Contains('reportPath') -and $null -ne $data['reportPath'] -and -not (Test-MediaNormalizerWorkerString $data['reportPath'])) { $errors.Add('reportPath must be a string or null') }
+                if ($planned -and (-not (Test-MediaNormalizerWorkerString $data.inputRoot) -or
+                    -not (Test-MediaNormalizerWorkerPathList $data.scanPaths) -or
+                    -not (Test-MediaNormalizerWorkerPathList $data.protectedInputs) -or
+                    -not (Test-MediaNormalizerWorkerArray $data.plannedFiles) -or
+                    $data.plannedFiles.Count -ne $data.inputPaths.Count -or
+                    @($data.plannedFiles | Where-Object { -not (Test-MediaNormalizerWorkerOutputRow $_) }).Count -gt 0)) {
+                    $errors.Add('planned normalize fields are invalid')
+                }
                 if ($data.Contains('speedPercentByPath')) {
                     if ($data.speedPercentByPath -isnot [Collections.IDictionary]) { $errors.Add('speedPercentByPath must be an object') }
                     else {
@@ -174,10 +242,21 @@ function Test-MediaNormalizerWorkerMessage {
     } else {
         $name = [string]$data.type
         $common = @('schemaVersion', 'type')
+        $plannedScan = $name -eq 'scan-result' -and $data.Contains('runId')
         switch ($name) {
-            'capabilities-result' { $required = $common + @('id', 'modes', 'audioInputExtensions', 'videoInputExtensions', 'audioOutputFormats'); $allowed = $required }
-            'scan-result' { $required = $common + @('id', 'files'); $allowed = $required }
-            'run-start' { $required = $common + @('runId', 'mode'); $allowed = $required }
+            'capabilities-result' {
+                $required = $common + @('id', 'modes', 'audioInputExtensions', 'videoInputExtensions', 'audioOutputFormats')
+                $allowed = $required + @('outputSelections')
+            }
+            'scan-result' {
+                $required = $common + @('id', 'files')
+                if ($plannedScan) { $required += @('runId', 'status', 'inputRoot') }
+                $allowed = $required
+            }
+            'run-start' {
+                $selectionField = if ($data.Contains('outputSelection')) { 'outputSelection' } else { 'mode' }
+                $required = $common + @('runId', $selectionField); $allowed = $required
+            }
             'file-start' { $required = $common + @('runId', 'fileIndex', 'total', 'inputPath'); $allowed = $required }
             'progress' { $required = $common + @('runId', 'percent', 'phase', 'eta', 'inputPath'); $allowed = $required }
             'log' { $required = $common + @('runId', 'level', 'message'); $allowed = $required }
@@ -207,10 +286,23 @@ function Test-MediaNormalizerWorkerMessage {
                     if (@($data[$arrayName] | Where-Object { -not (Test-MediaNormalizerWorkerString $_) }).Count -gt 0) { $errors.Add("$arrayName must contain strings") }
                 }
                 if (@($data.modes | Where-Object { $_ -notin @('audio', 'video', 'both') }).Count -gt 0) { $errors.Add('modes contains an invalid mode') }
-                if (@($data.audioOutputFormats | Where-Object { $_ -notin @('mp3', 'm4a', 'aac', 'flac', 'wav', 'opus', 'ogg') }).Count -gt 0) { $errors.Add('audioOutputFormats contains an invalid format') }
+                if (@($data.audioOutputFormats | Where-Object { $_ -notin $script:WorkerAudioFormats }).Count -gt 0) { $errors.Add('audioOutputFormats contains an invalid format') }
+                if ($data.Contains('outputSelections') -and (-not (Test-MediaNormalizerWorkerArray $data.outputSelections) -or
+                    @($data.outputSelections | Where-Object { -not (Test-MediaNormalizerWorkerEnum $_ $script:WorkerOutputSelections) }).Count -gt 0)) {
+                    $errors.Add('outputSelections is invalid')
+                }
             }
             'scan-result' {
                 if (-not (Test-MediaNormalizerWorkerArray $data.files)) { $errors.Add('files must be an array') }
+                elseif ($plannedScan) {
+                    if (-not (Test-MediaNormalizerWorkerGuid $data.runId) -or
+                        -not (Test-MediaNormalizerWorkerString $data.inputRoot) -or
+                        -not (Test-MediaNormalizerWorkerEnum $data.status @('completed', 'cancelled')) -or
+                        ($data.status -eq 'cancelled' -and $data.files.Count -ne 0) -or
+                        @($data.files | Where-Object { -not (Test-MediaNormalizerWorkerOutputRow $_ -Scan) }).Count -gt 0) {
+                        $errors.Add('planned scan response is invalid')
+                    }
+                }
                 else { foreach ($file in $data.files) {
                     $requiredFileFields = @('path', 'extension', 'audioEligible', 'videoEligible')
                     if ($file -isnot [Collections.IDictionary] -or @($requiredFileFields | Where-Object { -not $file.Contains($_) }).Count -gt 0) { $errors.Add('each file needs path, extension, audioEligible, and videoEligible'); break }
@@ -218,7 +310,11 @@ function Test-MediaNormalizerWorkerMessage {
                     if (@($file.Keys | Where-Object { $_ -notin @('path', 'extension', 'audioEligible', 'videoEligible') }).Count -gt 0) { $errors.Add('scan file entry has unexpected fields'); break }
                 } }
             }
-            'run-start' { if (-not (Test-MediaNormalizerWorkerEnum $data.mode @('audio', 'video', 'both'))) { $errors.Add('mode is invalid') } }
+            'run-start' {
+                if ($data.Contains('outputSelection')) {
+                    if (-not (Test-MediaNormalizerWorkerEnum $data.outputSelection $script:WorkerOutputSelections)) { $errors.Add('outputSelection is invalid') }
+                } elseif (-not (Test-MediaNormalizerWorkerEnum $data.mode @('audio', 'video', 'both'))) { $errors.Add('mode is invalid') }
+            }
             'file-start' {
                 if (-not (Test-MediaNormalizerWorkerNumber $data.fileIndex -Integer) -or [int]$data.fileIndex -lt 1 -or -not (Test-MediaNormalizerWorkerNumber $data.total -Integer) -or [int]$data.total -lt 1) { $errors.Add('fileIndex and total must be positive integers') }
                 if (-not (Test-MediaNormalizerWorkerString $data['inputPath'])) { $errors.Add('inputPath is invalid') }
@@ -294,4 +390,4 @@ function Test-MediaNormalizerWorkerEvent {
     return Test-MediaNormalizerWorkerMessage -Message $Message -Kind Event
 }
 
-Export-ModuleMember -Function Test-MediaNormalizerWorkerCommand, Test-MediaNormalizerWorkerEvent
+Export-ModuleMember -Function Get-MediaNormalizerOutputSelections, Test-MediaNormalizerWorkerCommand, Test-MediaNormalizerWorkerEvent

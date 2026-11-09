@@ -26,6 +26,9 @@
       "type": ["string", "null"],
       "enum": ["audio", "video", "both", null],
       "default": "audio"
+    },
+    "lastOutputSelection": {
+      "enum": ["auto", "mp4", "original-video", "audio-and-video", "mp3", "m4a", "aac", "flac", "wav", "opus", "ogg"]
     }
   },
   "additionalProperties": true

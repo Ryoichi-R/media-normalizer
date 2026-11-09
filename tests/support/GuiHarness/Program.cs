@@ -105,7 +105,7 @@ await Task.Delay(100);
 using (var replacement = new GuiActivationChannel(activationRoot,() => { }))
     Check(await startup,"Starting instance replaces stale endpoint");
 using var session = HeadlessUnitTestSession.StartNew(typeof(MediaNormalizer.Gui.Tests.TestApplication));
-await session.Dispatch(async () =>
+var guiChecks = session.Dispatch(async () =>
 {
     var runtime = new GuiRuntime(resources,state);
     var window = new MainWindow(runtime);
@@ -118,8 +118,13 @@ await session.Dispatch(async () =>
     await window.ScanAsync();
     Check(window.FileCount == 8,"Core scan finds eight fixtures");
     Check(window.CanRun,"Run enabled after scan");
-    var format = window.GetLogicalDescendants().OfType<ComboBox>().Single(b => b.Items.Cast<object?>().Any(v => Equals(v,"flac")));
-    format.SelectedItem = "flac";
+    var format = window.GetLogicalDescendants().OfType<ComboBox>().Single(box => box.Items.Any(item => item?.ToString() == "FLAC"));
+    Check(format.SelectedItem?.ToString()?.StartsWith("自動", StringComparison.Ordinal) == true, "New settings default to auto");
+    format.SelectedItem = format.Items.Single(item => item?.ToString() == "FLAC");
+    var preset = window.GetLogicalDescendants().OfType<ComboBox>().Single(box => box.Items.Contains("Custom"));
+    preset.SelectedItem = "Custom";
+    Check(format.SelectedItem?.ToString() == "FLAC", "Preset selection preserves explicit output");
+    preset.SelectedIndex = 0;
     Check(!window.CanRun,"Changing output format requires rescan");
     await window.ScanAsync();
     Check(window.CanRun,"Rescan enables run");
@@ -127,6 +132,28 @@ await session.Dispatch(async () =>
     selection[0].IsChecked = false;
     await window.ScanAsync();
     Check(window.GetLogicalDescendants().OfType<CheckBox>().First(b => b.Content is null).IsChecked == false,"Selection survives rescan");
+    var earlyCancelledScan = window.ScanAsync();
+    window.GetLogicalDescendants().OfType<Button>().Single(b => Equals(b.Content,"キャンセル")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+    await earlyCancelledScan;
+    Check(window.CurrentStatus == "スキャンをキャンセルしました。" && window.FileCount == 0 && !window.CanRun,
+        "Cancelling as a scan starts is a clean cancellation: " + window.CurrentStatus);
+    var cancelledScan = window.ScanAsync();
+    await WaitAsync(() =>
+    {
+        if (cancelledScan.IsCompleted) return true;
+        try
+        {
+            using var record = JsonDocument.Parse(File.ReadAllText(Path.Combine(state,"run","active-run.json")));
+            return record.RootElement.GetProperty("status").GetString() == "running" && record.RootElement.GetProperty("processes").GetArrayLength() > 1;
+        }
+        catch (Exception exception) when (exception is IOException or JsonException) { return false; }
+    });
+    window.GetLogicalDescendants().OfType<Button>().Single(b => Equals(b.Content,"キャンセル")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+    await cancelledScan;
+    Check(window.CurrentStatus == "スキャンをキャンセルしました。" && window.FileCount == 0 && !window.CanRun,
+        "Cancelling a scan clears rows and disables run: " + window.CurrentStatus);
+    await window.ScanAsync();
+    Check(window.FileCount == 8 && window.CanRun,"Rescan after cancellation succeeds");
 
     using (var frame = window.CaptureRenderedFrame()) frame?.Save(Path.Combine(state,"window.png"));
     boxes[0].Text = Path.Combine(fixtures,"audio-dynamic.wav");
@@ -165,6 +192,103 @@ await session.Dispatch(async () =>
     window.Close();
     var values = new SettingsStore(Path.Combine(state,"settings.json")).Read();
     Check(values.Values.InputDir == fixtures,"Settings persisted");
+    Check(values.Values.LastOutputSelection == "flac", "Explicit selection persisted");
+
+    var migrationRoot = Path.Combine(state, "legacy-migration");
+    var migrationStore = new SettingsStore(Path.Combine(migrationRoot, "settings.json"));
+    migrationStore.Save(new SettingsValues(fixtures, Path.Combine(state, "output"), "デフォルト", "video"));
+    var legacy = new MainWindow(new GuiRuntime(resources, migrationRoot));
+    legacy.Show();
+    await WaitAsync(() => legacy.IsReady);
+    Check(legacy.GetLogicalDescendants().OfType<Button>().Any(button => Equals(button.Content, "以前の設定に戻す") && button.IsVisible),
+        "Legacy settings display the migration notice");
+    legacy.Close();
+    Check(migrationStore.Read().RequiresOutputMigration, "Closing the app without acknowledgement preserves pending migration");
+    var reopened = new MainWindow(new GuiRuntime(resources, migrationRoot));
+    reopened.Show();
+    await WaitAsync(() => reopened.IsReady);
+    reopened.GetLogicalDescendants().OfType<Button>().Single(button => Equals(button.Content, "以前の設定に戻す"))
+        .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+    Check(migrationStore.Read().Values.LastOutputSelection == "original-video",
+        "Explicitly restoring the legacy mode persists the equivalent output choice");
+    reopened.Close();
+
+    var planned = new MainWindow(new GuiRuntime(resources, Path.Combine(state, "planned-rows")));
+    planned.Show();
+    await WaitAsync(() => planned.IsReady);
+    var plannedFormat = planned.GetLogicalDescendants().OfType<ComboBox>().Single(box => box.Items.Any(item => item?.ToString() == "MP3"));
+    var plannedPreset = planned.GetLogicalDescendants().OfType<ComboBox>().Single(box => box.Items.Contains("放送（EBU R 128）"));
+    Check(plannedFormat.SelectedItem?.ToString() == "自動（動画は元の形式／音声は MP3）", "Auto label names the default preset format");
+    plannedPreset.SelectedItem = "放送（EBU R 128）";
+    Check(plannedFormat.SelectedItem?.ToString() == "自動（動画は元の形式／音声は M4A）", "Auto label follows the selected preset");
+    plannedPreset.SelectedIndex = 0;
+    plannedFormat.SelectedItem = plannedFormat.Items.Single(item => item?.ToString() == "MP3");
+    var plannedBoxes = planned.GetLogicalDescendants().OfType<TextBox>().Where(b => !b.IsReadOnly).ToArray();
+    plannedBoxes[0].Text = fixtures; plannedBoxes[1].Text = Path.Combine(state, "planned-output");
+    await planned.ScanAsync();
+    var rows = Rows(planned);
+    const string duplicateWarning = "選択行どうしで出力予定名が重複しています。";
+    var dynamicRows = rows.Where(row => row.Name.StartsWith("audio-dynamic.", StringComparison.Ordinal)).ToArray();
+    Check(dynamicRows.Length == 4 && dynamicRows.All(row => row.Details.Text!.Contains(duplicateWarning, StringComparison.Ordinal)),
+        "Same-name MP3 destinations warn on every selected row");
+    var corrupt = rows.Single(row => row.Name == "invalid-corrupt.mp4");
+    Check(!corrupt.Box.IsEnabled && corrupt.Box.IsChecked == false, "Unusable rows cannot be selected");
+    foreach (var row in dynamicRows.Skip(1)) row.Box.IsChecked = false;
+    Check(!dynamicRows[0].Details.Text!.Contains(duplicateWarning, StringComparison.Ordinal), "Warning clears once the duplicate is deselected");
+    Check(planned.CanRun, "A selection without duplicates can run");
+    foreach (var row in rows.Where(row => row.Box.IsEnabled)) row.Box.IsChecked = false;
+    Check(!planned.CanRun, "No valid selection disables run");
+    planned.Close();
+
+    var pendingRoot = Path.Combine(state, "pending-migration");
+    var pendingStore = new SettingsStore(Path.Combine(pendingRoot, "settings.json"));
+    pendingStore.Save(new SettingsValues(fixtures, Path.Combine(state, "pending-output"), "デフォルト", "audio"));
+    var pending = new MainWindow(new GuiRuntime(resources, pendingRoot));
+    pending.Show();
+    await WaitAsync(() => pending.IsReady);
+    var pendingBoxes = pending.GetLogicalDescendants().OfType<TextBox>().Where(b => !b.IsReadOnly).ToArray();
+    pendingBoxes[0].Text = Path.Combine(fixtures, "audio-dynamic.wav"); pendingBoxes[1].Text = Path.Combine(state, "pending-output");
+    await pending.ScanAsync();
+    pending.GetLogicalDescendants().OfType<Button>().Single(b => Equals(b.Content, "実行")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+    await WaitAsync(() => pending.OwnedWindows.Count > 0);
+    pending.OwnedWindows.Single().GetLogicalDescendants().OfType<Button>().Single(b => Equals(b.Content, "この内容で実行")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+    await WaitAsync(() => pending.CurrentStatus == "処理が完了しました。" || pending.CurrentStatus.StartsWith("処理が終了", StringComparison.Ordinal));
+    Check(pending.CurrentStatus == "処理が完了しました。", "Pending-migration run completed: " + pending.CurrentStatus);
+    var pendingRead = pendingStore.Read();
+    Check(pendingRead.RequiresOutputMigration && pendingRead.Values.LastOutputSelection is null && pendingRead.Values.LastMode == "audio",
+        "A run before acknowledgement keeps lastMode and does not write lastOutputSelection");
+    pending.Close();
+    Check(pendingStore.Read().RequiresOutputMigration, "Closing after a run keeps the migration pending");
+
+    var keep = new MainWindow(new GuiRuntime(resources, pendingRoot));
+    keep.Show();
+    await WaitAsync(() => keep.IsReady);
+    var keepButton = keep.GetLogicalDescendants().OfType<Button>().Single(button => Equals(button.Content, "確認"));
+    if (!OperatingSystem.IsWindows())
+    {
+        var original = File.GetUnixFileMode(pendingRoot);
+        File.SetUnixFileMode(pendingRoot, UnixFileMode.UserRead | UnixFileMode.UserExecute);
+        try
+        {
+            keepButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Check(keepButton.IsEffectivelyVisible && pendingStore.Read().RequiresOutputMigration,
+                "A failed acknowledgement save keeps the notice and the legacy settings");
+        }
+        finally { File.SetUnixFileMode(pendingRoot, original); }
+    }
+    keepButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+    Check(!keepButton.IsEffectivelyVisible, "Acknowledgement hides the notice");
+    var acknowledged = pendingStore.Read();
+    Check(!acknowledged.RequiresOutputMigration && acknowledged.Values.LastOutputSelection == "auto",
+        "Acknowledging keeps auto and completes migration");
+    keep.Close();
+    var afterKeep = new MainWindow(new GuiRuntime(resources, pendingRoot));
+    afterKeep.Show();
+    await WaitAsync(() => afterKeep.IsReady);
+    Check(!afterKeep.GetLogicalDescendants().OfType<Button>().Any(button => Equals(button.Content, "以前の設定に戻す") && button.IsVisible),
+        "An acknowledged migration is not shown again");
+    afterKeep.Close();
+
     var invalid = new MainWindow(new GuiRuntime(Path.Combine(state,"missing-runtime"),Path.Combine(state,"invalid")));
     invalid.Show();
     await WaitAsync(() => invalid.CurrentStatus.StartsWith("起動できません",StringComparison.Ordinal));
@@ -172,10 +296,26 @@ await session.Dispatch(async () =>
     invalid.Close();
     return true;
 }, CancellationToken.None);
+try { await guiChecks; }
+catch (Exception exception)
+{
+    // Exit before disposing the headless session: open windows can block disposal and hide the failure.
+    Console.Error.WriteLine("GuiHarness failed: " + exception);
+    Environment.Exit(1);
+}
 Console.WriteLine("GUI headless initialization, Core scan, invalidation, settings, activation and missing-runtime checks passed.");
 return 0;
 
 static void Check(bool condition,string message) { if (!condition) throw new InvalidOperationException(message); }
+static (CheckBox Box, TextBlock Details, string Name)[] Rows(MainWindow window) =>
+    window.GetLogicalDescendants().OfType<Grid>()
+        .Where(grid => grid.Children.Count == 4 && grid.Children[0] is CheckBox { Content: null } && grid.Children[1] is StackPanel { Children.Count: 2 })
+        .Select(grid =>
+        {
+            var description = (StackPanel)grid.Children[1];
+            return ((CheckBox)grid.Children[0], (TextBlock)description.Children[1], ((TextBlock)description.Children[0]).Text ?? string.Empty);
+        })
+        .ToArray();
 static async Task WaitAsync(Func<bool> condition)
 {
     using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));

@@ -10,11 +10,81 @@
     "id": { "type": "string", "format": "uuid" },
     "runId": { "type": "string", "format": "uuid" },
     "mode": { "enum": ["audio", "video", "both"] },
+    "outputSelection": {"enum": ["auto", "mp4", "original-video", "audio-and-video", "mp3", "m4a", "aac", "flac", "wav", "opus", "ogg"]},
+    "plannedScanCommand": {
+      "type": "object", "required": ["schemaVersion", "id", "cmd", "paths", "recurse", "runId", "outputSelection", "audioOutputFormat", "analyzeOnly", "outputDir", "preserveHierarchy", "collisionPolicy"],
+      "properties": {
+        "schemaVersion": {"const": 1},
+        "id": {"$ref": "#/$defs/id"},
+        "cmd": {"const": "scan"},
+        "paths": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "recurse": {"type": "boolean"},
+        "runId": {"$ref": "#/$defs/runId"},
+        "outputSelection": {"$ref": "#/$defs/outputSelection"},
+        "audioOutputFormat": {"enum": ["mp3", "m4a", "aac", "flac", "wav", "opus", "ogg"]},
+        "analyzeOnly": {"type": "boolean"},
+        "outputDir": {"type": "string"},
+        "preserveHierarchy": {"type": "boolean"},
+        "collisionPolicy": {"enum": ["rename", "skip", "overwrite"]}
+      }, "additionalProperties": false
+    },
+    "plannedNormalizeCommand": {
+      "type": "object", "required": ["schemaVersion", "id", "cmd", "runId", "inputPaths", "outputDir", "target", "truePeak", "bitrate", "sampleRate", "collisionPolicy", "speedPercent", "audioOutputFormat", "analyzeOnly", "skipIfNormalized", "normalizationTolerance", "recurse", "preserveHierarchy", "outputSelection", "inputRoot", "scanPaths", "protectedInputs", "plannedFiles"],
+      "properties": {
+        "schemaVersion": {"const": 1},
+        "id": {"$ref": "#/$defs/id"},
+        "cmd": {"const": "normalize"},
+        "runId": {"$ref": "#/$defs/runId"},
+        "inputPaths": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "outputDir": {"type": "string", "minLength": 1},
+        "target": {"type": "number"},
+        "truePeak": {"type": "number"},
+        "bitrate": {"type": "string", "minLength": 1},
+        "sampleRate": {"type": "string", "minLength": 1},
+        "collisionPolicy": {"enum": ["rename", "skip", "overwrite"]},
+        "speedPercent": {"type": "integer", "minimum": 50, "maximum": 200},
+        "speedPercentByPath": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 50, "maximum": 200}},
+        "audioOutputFormat": {"enum": ["mp3", "m4a", "aac", "flac", "wav", "opus", "ogg"]},
+        "analyzeOnly": {"type": "boolean"},
+        "skipIfNormalized": {"type": "boolean"},
+        "normalizationTolerance": {"type": "number", "minimum": 0, "maximum": 10},
+        "recurse": {"type": "boolean"},
+        "preserveHierarchy": {"type": "boolean"},
+        "reportPath": {"type": ["string", "null"]},
+        "outputSelection": {"$ref": "#/$defs/outputSelection"},
+        "inputRoot": {"type": "string", "minLength": 1},
+        "scanPaths": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "protectedInputs": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "plannedFiles": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["path", "formats", "size", "modifiedTicks"], "properties": {"path": {"type": "string", "minLength": 1}, "formats": {"type": "array", "maxItems": 2, "items": {"enum": ["mp4", "mov", "mkv", "mp3", "m4a", "aac", "flac", "wav", "opus", "ogg"]}}, "size": {"type": "integer", "minimum": 0}, "modifiedTicks": {"type": "integer", "minimum": 0}}, "additionalProperties": false}}
+      }, "additionalProperties": false
+    },
+    "plannedScanResult": {
+      "type": "object", "required": ["schemaVersion", "type", "id", "runId", "inputRoot", "status", "files"],
+      "properties": {
+        "schemaVersion": {"const": 1},
+        "type": {"const": "scan-result"},
+        "id": {"$ref": "#/$defs/id"},
+        "runId": {"$ref": "#/$defs/runId"},
+        "inputRoot": {"type": "string", "minLength": 1},
+        "status": {"enum": ["completed", "cancelled"]},
+        "files": {"type": "array", "items": {"type": "object", "required": ["path", "formats", "size", "modifiedTicks", "kind", "duration", "reason", "speedReason", "warning", "destinations"], "properties": {"path": {"type": "string", "minLength": 1}, "formats": {"type": "array", "maxItems": 2, "items": {"enum": ["mp4", "mov", "mkv", "mp3", "m4a", "aac", "flac", "wav", "opus", "ogg"]}}, "size": {"type": "integer", "minimum": 0}, "modifiedTicks": {"type": "integer", "minimum": 0}, "kind": {"enum": ["audio", "video", "no-audio", "unknown"]}, "duration": {"type": "number", "minimum": 0}, "reason": {"type": ["string", "null"], "minLength": 1}, "speedReason": {"type": ["string", "null"], "minLength": 1}, "warning": {"type": ["string", "null"], "minLength": 1}, "destinations": {"type": "array", "items": {"type": "string", "minLength": 1}}}, "additionalProperties": false}}
+      }, "additionalProperties": false,
+      "allOf": [{"if": {"properties": {"status": {"const": "cancelled"}}}, "then": {"properties": {"files": {"maxItems": 0}}}}]
+    },
+    "plannedRunStart": {
+      "type": "object", "required": ["schemaVersion", "type", "runId", "outputSelection"],
+      "properties": {
+        "schemaVersion": {"const": 1},
+        "type": {"const": "run-start"},
+        "runId": {"$ref": "#/$defs/runId"},
+        "outputSelection": {"$ref": "#/$defs/outputSelection"}
+      }, "additionalProperties": false
+    },
     "command": {
       "oneOf": [
         { "$ref": "#/$defs/capabilitiesCommand" },
-        { "$ref": "#/$defs/scanCommand" },
-        { "$ref": "#/$defs/normalizeCommand" },
+        { "$ref": "#/$defs/scanCommand" }, { "$ref": "#/$defs/plannedScanCommand" },
+        { "$ref": "#/$defs/normalizeCommand" }, { "$ref": "#/$defs/plannedNormalizeCommand" },
         { "$ref": "#/$defs/cancelCommand" },
         { "$ref": "#/$defs/processRegistrationAckCommand" },
         { "$ref": "#/$defs/temporaryFileRegistrationAckCommand" }
@@ -24,7 +94,8 @@
       "type": "object",
       "required": ["schemaVersion", "id", "cmd"],
       "properties": {
-        "schemaVersion": { "const": 1 }, "id": { "$ref": "#/$defs/id" }, "cmd": { "const": "capabilities" }
+        "schemaVersion": { "const": 1 }, "id": { "$ref": "#/$defs/id" }, "cmd": { "const": "capabilities" },
+        "outputSelectionProtocol": { "type": "boolean" }
       },
       "additionalProperties": false
     },
@@ -90,8 +161,8 @@
     },
     "event": {
       "oneOf": [
-        { "$ref": "#/$defs/capabilitiesResult" }, { "$ref": "#/$defs/scanResult" },
-        { "$ref": "#/$defs/runStart" }, { "$ref": "#/$defs/fileStart" },
+        { "$ref": "#/$defs/capabilitiesResult" }, { "$ref": "#/$defs/scanResult" }, { "$ref": "#/$defs/plannedScanResult" },
+        { "$ref": "#/$defs/runStart" }, { "$ref": "#/$defs/plannedRunStart" }, { "$ref": "#/$defs/fileStart" },
         { "$ref": "#/$defs/progress" }, { "$ref": "#/$defs/log" },
         { "$ref": "#/$defs/fileDone" }, { "$ref": "#/$defs/runDone" },
         { "$ref": "#/$defs/error" }, { "$ref": "#/$defs/processStarting" },
@@ -106,7 +177,8 @@
         "modes": { "type": "array", "items": { "$ref": "#/$defs/mode" } },
         "audioInputExtensions": { "type": "array", "items": { "type": "string" } },
         "videoInputExtensions": { "type": "array", "items": { "type": "string" } },
-        "audioOutputFormats": { "type": "array", "items": { "enum": ["mp3", "m4a", "aac", "flac", "wav", "opus", "ogg"] } }
+        "audioOutputFormats": { "type": "array", "items": { "enum": ["mp3", "m4a", "aac", "flac", "wav", "opus", "ogg"] } },
+        "outputSelections": { "type": "array", "items": { "$ref": "#/$defs/outputSelection" } }
       }, "additionalProperties": false
     },
     "scanResult": {

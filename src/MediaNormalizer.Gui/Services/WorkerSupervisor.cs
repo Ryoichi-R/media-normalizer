@@ -14,6 +14,8 @@ namespace MediaNormalizer.Gui.Services;
 /// </summary>
 public sealed class WorkerSupervisor : IDisposable
 {
+    private static readonly TimeSpan InitialCommandTimeout = TimeSpan.FromSeconds(5);
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -48,6 +50,8 @@ public sealed class WorkerSupervisor : IDisposable
     private string? _requestId;
     private bool _sawRunDone;
     private bool _sawCommandResponse;
+    private bool _plannedScan;
+    private bool _sawInvalidCommand;
     private bool _workerReportedRecoveryRequired;
     private string? _workerRecoveryMessage;
 
@@ -230,7 +234,10 @@ public sealed class WorkerSupervisor : IDisposable
         _sawCommandResponse = false;
         _workerReportedRecoveryRequired = false;
         _workerRecoveryMessage = null;
-        if (string.Equals(Convert.ToString(commandCopy.GetValueOrDefault("cmd"), CultureInfo.InvariantCulture), "normalize", StringComparison.Ordinal))
+        _sawInvalidCommand = false;
+        var commandName = Convert.ToString(commandCopy.GetValueOrDefault("cmd"), CultureInfo.InvariantCulture);
+        _plannedScan = commandName == "scan" && commandCopy.ContainsKey("outputSelection");
+        if (commandName == "normalize" || _plannedScan)
         {
             commandCopy["runId"] = _runId;
         }
@@ -250,7 +257,10 @@ public sealed class WorkerSupervisor : IDisposable
             IntermediatePaths = [],
             PendingProcessStarts = []
         };
-        await PersistRecordAsync(cancellationToken).ConfigureAwait(false);
+        // Cancellation is delivered to the worker as a protocol command once it has the request.
+        // Aborting persistence, start-up or the command write would leave a started worker without
+        // a terminal event and force recovery, so these steps never observe the caller's token.
+        await PersistRecordAsync(CancellationToken.None).ConfigureAwait(false);
 
         var startInfo = new ProcessStartInfo
         {
@@ -277,6 +287,7 @@ public sealed class WorkerSupervisor : IDisposable
         startInfo.ArgumentList.Add(_storageRoot);
         var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
         _worker = process;
+        var initialCommandTimedOut = false;
         try
         {
             if (!process.Start())
@@ -296,8 +307,21 @@ public sealed class WorkerSupervisor : IDisposable
             };
             _knownProcesses[_workerIdentity.IdentityKey] = _workerIdentity;
             _record.Processes = _knownProcesses.Values.OrderBy(static item => item.ProcessId).ToList();
-            await PersistRecordAsync(cancellationToken).ConfigureAwait(false);
-            await WriteCommandAsync(commandCopy, cancellationToken).ConfigureAwait(false);
+            await PersistRecordAsync(CancellationToken.None).ConfigureAwait(false);
+            // Keep the caller's cancellation as a protocol message, but bound a blocked stdin write.
+            // WaitAsync supplies a deadline even when the pipe write cannot be interrupted.
+            var initialWrite = WriteWorkerCommandAsync(_workerInput, commandCopy, CancellationToken.None);
+            try
+            {
+                await initialWrite.WaitAsync(InitialCommandTimeout, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (TimeoutException exception)
+            {
+                initialCommandTimedOut = true;
+                _ = initialWrite.ContinueWith(static task => { _ = task.Exception; }, CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                throw new TimeoutException("ワーカーへの初回コマンド送信がタイムアウトしました。", exception);
+            }
 
             var stderrTask = process.StandardError.ReadToEndAsync(CancellationToken.None);
             using var cancellationRegistration = cancellationToken.Register(() => _ = TrySendCancelAsync());
@@ -308,7 +332,6 @@ public sealed class WorkerSupervisor : IDisposable
             await CaptureProcessTreeAsync(CancellationToken.None).ConfigureAwait(false);
 
             var exitCode = process.ExitCode;
-            var commandName = Convert.ToString(commandCopy.GetValueOrDefault("cmd"), CultureInfo.InvariantCulture);
             var normalized = string.Equals(commandName, "normalize", StringComparison.Ordinal);
             var expectedTerminalEvent = commandName switch
             {
@@ -319,8 +342,11 @@ public sealed class WorkerSupervisor : IDisposable
             var cleanJobConflict = normalized && exitCode == 3 && _registrations.IsEmpty && _pendingStarts.IsEmpty &&
                 _record.IntermediatePaths.Count == 0;
             var resultExitCode = !expectedTerminalEvent && exitCode == 0 ? 1 : exitCode;
-            var normalExit = streamEndedCleanly && (expectedTerminalEvent || cleanJobConflict) && _monitorFailure is null &&
-                (exitCode == 0 || cleanJobConflict);
+            var versionMismatch = commandName == "capabilities" && commandCopy.ContainsKey("outputSelectionProtocol") &&
+                _sawInvalidCommand && exitCode == 2 && _registrations.IsEmpty && _pendingStarts.IsEmpty &&
+                _record.IntermediatePaths.Count == 0;
+            var normalExit = streamEndedCleanly && _monitorFailure is null &&
+                ((expectedTerminalEvent && exitCode == 0) || cleanJobConflict || versionMismatch);
             var needsRecovery = !normalExit || HasLiveRegisteredProcess();
 
             if (needsRecovery)
@@ -373,7 +399,7 @@ public sealed class WorkerSupervisor : IDisposable
         catch (Exception exception)
         {
             StopMonitor();
-            if (!process.HasExited)
+            if (!initialCommandTimedOut && !process.HasExited)
             {
                 try
                 {
@@ -385,9 +411,10 @@ public sealed class WorkerSupervisor : IDisposable
                     // The durable recovery record below blocks subsequent work if the worker will not stop.
                 }
             }
-            if (process.HasExited && _monitorFailure is null)
+            if ((initialCommandTimedOut || process.HasExited) && _monitorFailure is null)
             {
-                await CaptureProcessTreeAsync(CancellationToken.None).ConfigureAwait(false);
+                if (!initialCommandTimedOut)
+                    await CaptureProcessTreeAsync(CancellationToken.None).ConfigureAwait(false);
                 await SetStatusAsync("recovering", CancellationToken.None).ConfigureAwait(false);
                 var recovered = await RecoverKnownProcessesAsync(CancellationToken.None).ConfigureAwait(false);
                 if (recovered && _pendingStarts.IsEmpty && TryAcquireJobLock(out var jobLock) && jobLock is not null)
@@ -414,7 +441,9 @@ public sealed class WorkerSupervisor : IDisposable
         finally
         {
             StopMonitor();
-            _workerInput?.Dispose();
+            // A timed-out write may still be draining. Close the pipe without flushing its writer.
+            if (initialCommandTimedOut) _workerInput?.BaseStream.Dispose();
+            else _workerInput?.Dispose();
             _workerInput = null;
             process.Dispose();
             _worker = null;
@@ -648,6 +677,9 @@ public sealed class WorkerSupervisor : IDisposable
                 case "scan-result":
                     _sawCommandResponse = true;
                     break;
+                case "error" when message.GetProperty("code").GetString() == "INVALID_COMMAND":
+                    _sawInvalidCommand = true;
+                    break;
                 case "error" when string.Equals(message.GetProperty("code").GetString(), "RECOVERY_REQUIRED", StringComparison.Ordinal):
                     _workerReportedRecoveryRequired = true;
                     _workerRecoveryMessage = message.GetProperty("message").GetString();
@@ -674,8 +706,11 @@ public sealed class WorkerSupervisor : IDisposable
 
         var shape = type switch
         {
-            "capabilities-result" => (new[] { "schemaVersion", "type", "id", "modes", "audioInputExtensions", "videoInputExtensions", "audioOutputFormats" }, new[] { "schemaVersion", "type", "id", "modes", "audioInputExtensions", "videoInputExtensions", "audioOutputFormats" }),
+            "capabilities-result" => (new[] { "schemaVersion", "type", "id", "modes", "audioInputExtensions", "videoInputExtensions", "audioOutputFormats" }, new[] { "schemaVersion", "type", "id", "modes", "audioInputExtensions", "videoInputExtensions", "audioOutputFormats", "outputSelections" }),
+            "scan-result" when _plannedScan => (new[] { "schemaVersion", "type", "id", "files", "runId", "status", "inputRoot" }, new[] { "schemaVersion", "type", "id", "files", "runId", "status", "inputRoot" }),
             "scan-result" => (new[] { "schemaVersion", "type", "id", "files" }, new[] { "schemaVersion", "type", "id", "files" }),
+            "run-start" when message.TryGetProperty("outputSelection", out _) =>
+                (new[] { "schemaVersion", "type", "runId", "outputSelection" }, new[] { "schemaVersion", "type", "runId", "outputSelection" }),
             "run-start" => (new[] { "schemaVersion", "type", "runId", "mode" }, new[] { "schemaVersion", "type", "runId", "mode" }),
             "file-start" => (new[] { "schemaVersion", "type", "runId", "fileIndex", "total", "inputPath" }, new[] { "schemaVersion", "type", "runId", "fileIndex", "total", "inputPath" }),
             "progress" => (new[] { "schemaVersion", "type", "runId", "percent", "phase", "eta", "inputPath" }, new[] { "schemaVersion", "type", "runId", "percent", "phase", "eta", "inputPath" }),
@@ -710,6 +745,11 @@ public sealed class WorkerSupervisor : IDisposable
                 ValidateStringArray(message, "audioInputExtensions");
                 ValidateStringArray(message, "videoInputExtensions");
                 ValidateStringArray(message, "audioOutputFormats", ["mp3", "m4a", "aac", "flac", "wav", "opus", "ogg"]);
+                if (message.TryGetProperty("outputSelections", out _))
+                    ValidateStringArray(message, "outputSelections", OutputSelections);
+                break;
+            case "scan-result" when _plannedScan:
+                ValidatePlannedScan(message);
                 break;
             case "scan-result":
                 RequireGuid(message, "id");
@@ -724,7 +764,10 @@ public sealed class WorkerSupervisor : IDisposable
                 }
                 break;
             case "run-start":
-                RequireEventEnum(message, "mode", "audio", "video", "both");
+                if (message.TryGetProperty("outputSelection", out _))
+                    RequireEventEnum(message, "outputSelection", OutputSelections);
+                else
+                    RequireEventEnum(message, "mode", "audio", "video", "both");
                 break;
             case "file-start":
                 RequireEventInt(message, "fileIndex", 1);
@@ -789,6 +832,43 @@ public sealed class WorkerSupervisor : IDisposable
                 RequireEventString(message, "finalPath", nonEmpty: true);
                 RequireEventEnum(message, "role", "primary", "speed");
                 break;
+        }
+    }
+
+    private static readonly string[] OutputSelections =
+        ["auto", "mp4", "original-video", "audio-and-video", "mp3", "m4a", "aac", "flac", "wav", "opus", "ogg"];
+    private static readonly string[] OutputFormats =
+        ["mp4", "mov", "mkv", "mp3", "m4a", "aac", "flac", "wav", "opus", "ogg"];
+
+    private static void ValidatePlannedScan(JsonElement message)
+    {
+        RequireEventEnum(message, "status", "completed", "cancelled");
+        RequireEventString(message, "inputRoot", nonEmpty: true);
+        var files = RequireArray(message, "files");
+        if (message.GetProperty("status").GetString() == "cancelled" && files.GetArrayLength() != 0)
+            throw new InvalidDataException("RECOVERY_REQUIRED: cancelled scan contains selectable rows.");
+        var paths = new HashSet<string>(StringComparer.Ordinal);
+        string[] fields = ["path", "kind", "formats", "reason", "speedReason", "warning", "destinations", "size", "modifiedTicks", "duration"];
+        foreach (var file in files.EnumerateArray())
+        {
+            ValidateEventShape(file, fields, fields);
+            RequireEventString(file, "path", nonEmpty: true);
+            if (!paths.Add(file.GetProperty("path").GetString()!))
+                throw new InvalidDataException("RECOVERY_REQUIRED: scan contains a duplicate input path.");
+            RequireEventEnum(file, "kind", "audio", "video", "no-audio", "unknown");
+            ValidateStringArray(file, "formats", OutputFormats);
+            ValidateStringArray(file, "destinations");
+            foreach (var field in new[] { "reason", "speedReason", "warning" })
+            {
+                if (file.GetProperty(field).ValueKind != JsonValueKind.Null)
+                    RequireEventString(file, field, nonEmpty: true);
+            }
+            foreach (var field in new[] { "size", "modifiedTicks" })
+            {
+                if (!file.GetProperty(field).TryGetInt64(out var number) || number < 0)
+                    throw new InvalidDataException($"RECOVERY_REQUIRED: '{field}' must be a non-negative integer.");
+            }
+            RequireEventNumber(file, "duration", 0, double.MaxValue);
         }
     }
 
@@ -1401,13 +1481,18 @@ public sealed class WorkerSupervisor : IDisposable
         await _stdinGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            await _workerInput!.WriteLineAsync(JsonSerializer.Serialize(command, WorkerJsonOptions).AsMemory(), cancellationToken).ConfigureAwait(false);
-            await _workerInput.FlushAsync(cancellationToken).ConfigureAwait(false);
+            await WriteWorkerCommandAsync(_workerInput!, command, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
             _stdinGate.Release();
         }
+    }
+
+    private static async Task WriteWorkerCommandAsync(StreamWriter writer, IDictionary<string, object?> command, CancellationToken cancellationToken)
+    {
+        await writer.WriteLineAsync(JsonSerializer.Serialize(command, WorkerJsonOptions).AsMemory(), cancellationToken).ConfigureAwait(false);
+        await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private Task SendCommandAsync(IDictionary<string, object?> command, CancellationToken cancellationToken) => WriteCommandAsync(command, cancellationToken);

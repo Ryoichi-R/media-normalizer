@@ -139,7 +139,7 @@ treating managed DLLs as nested native code during bundle signing. CLI usage is 
 ```
 
 The app includes input pickers, drag/drop, Core-backed scan, per-file selection and speed,
-mode/format/target/peak settings, presets and rationale/current-value match, analysis-only,
+output selection, target and peak settings, presets and rationale/current-value match, analysis-only,
 recursive discovery, preserved hierarchy, collision policy, confirmation, progress/ETA,
 cancellation, and bounded persistent logs. Selection and individual speed survive rescans;
 changing global speed applies the new speed on the next scan. User presets are merged by name
@@ -197,6 +197,23 @@ macOS 15 runtime acceptance, Windows regression and cross-OS numeric comparison 
 claimed complete. The owner excluded the cross-OS comparison from this implementation.
 Workspace formatter/lint entrypoints reject this external standalone project; their invocation
 failed at inventory resolution. C# warning-as-error builds and PowerShell unit checks succeeded.
+
+## 1.2.0 の出力形式
+
+Mac の「出力形式」で「自動」、MP3 などの音声形式、MP4、「元の動画形式」、
+「音声＋元の動画形式」を選びます。自動はファイルの音声・映像ストリームを調べ、
+映像付き MP4／MOV／MKV は元の形式、音声のみと AVI はプリセットの音声形式で
+出力します。カバー画像は実映像の判定から除外します。
+
+明示した音声形式は動画からの抽出にも使われ、プリセットを切り替えても維持されます。
+明示 MP4 の入力は映像と音声を持つ MP4 が対象です。MOV／MKV は「元の動画形式」で
+処理できます。「確認（スキャン）」には各ファイルの予定形式、対象外理由、
+重複や原本との衝突が表示されます。解析のみでは出力形式・速度にかかわらず、
+対応入力の音声を元の状態で測定し、JSON レポートへ記録します。
+
+1.1.0 からの初回起動では出力形式を「自動」にして通知します。「以前の設定に戻す」
+で旧モード相当の出力に戻せます。確認操作で設定が保存されるまで、次回起動でも
+通知します。既存の入出力先とプリセットは引き継がれます。
 
 ## バージョン情報
 

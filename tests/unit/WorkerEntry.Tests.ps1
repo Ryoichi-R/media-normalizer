@@ -81,6 +81,19 @@ Describe 'Media Normalizer worker entry' {
         $event.audioOutputFormats | Should -Contain 'flac'
     }
 
+    It 'advertises planned output selections only on explicit capability requests' {
+        $command = @{ schemaVersion = 1; id = 'c0000000-0000-4000-8000-000000000001'; cmd = 'capabilities' }
+        $legacy = Invoke-MediaNormalizerWorkerFixture -Command $command
+        ($legacy.StdoutText | ConvertFrom-Json -AsHashtable).Contains('outputSelections') | Should -BeFalse
+        $command.outputSelectionProtocol = $true
+        $current = Invoke-MediaNormalizerWorkerFixture -Command $command
+        $current.ExitCode | Should -Be 0
+        $event = $current.StdoutText | ConvertFrom-Json -AsHashtable
+        $event.outputSelections | Should -Contain 'mp4'
+        $event.outputSelections | Should -Contain 'mp3'
+        $event.outputSelections | Should -Contain 'auto'
+    }
+
     It 'uses Core scan classification and filters unsupported files' {
         $root = Join-Path ([IO.Path]::GetTempPath()) ('mn-worker-scan-' + [guid]::NewGuid().ToString('N'))
         [void][IO.Directory]::CreateDirectory($root)

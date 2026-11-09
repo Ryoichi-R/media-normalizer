@@ -16,6 +16,21 @@ Describe 'Resolve-UniqueOutputPath' {
         Remove-Item -LiteralPath $script:tmpDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 
+    It 'preserves the reserved output when overwrite is selected for a later input' {
+        $options = @{ State = $script:state; Directory = $script:tmpDir; BaseName = 'a'; Extension = '.mp3'; Policy = 'overwrite' }
+        (Resolve-UniqueOutputPath @options) | Should -Be (Join-Path $script:tmpDir 'a.mp3')
+        (Resolve-UniqueOutputPath @options) | Should -Be (Join-Path $script:tmpDir 'a (2).mp3')
+    }
+
+    It 'refuses to replace a protected input and supports skip and rename' {
+        $protected = Join-Path $script:tmpDir 'a.mp3'
+        $options = @{ State = $script:state; Directory = $script:tmpDir; BaseName = 'a'; Extension = '.mp3' }
+        $options.IsProtectedInput = { param($path) $path -ceq $protected }.GetNewClosure()
+        { Resolve-UniqueOutputPath @options -Policy overwrite } | Should -Throw '*入力原本*'
+        (Resolve-UniqueOutputPath @options -Policy skip) | Should -BeNullOrEmpty
+        (Resolve-UniqueOutputPath @options -Policy rename) | Should -Be (Join-Path $script:tmpDir 'a (2).mp3')
+    }
+
     It '衝突なしで元名を返す' {
         $out = MediaNormalizer.Core\Resolve-UniqueOutputPath -State $script:state -Directory $script:tmpDir -BaseName 'a' -Extension '.mp3'
         $out | Should -Be (Join-Path $script:tmpDir 'a.mp3')

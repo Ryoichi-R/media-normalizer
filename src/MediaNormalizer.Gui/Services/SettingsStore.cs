@@ -6,7 +6,7 @@ using System.Text.Json;
 namespace MediaNormalizer.Gui.Services;
 
 /// <summary>Values recognized by Settings schema version 2.</summary>
-public sealed record SettingsValues(string? InputDir, string? OutputDir, string? LastPreset, string? LastMode)
+public sealed record SettingsValues(string? InputDir, string? OutputDir, string? LastPreset, string? LastMode, string? LastOutputSelection = null)
 {
     public static SettingsValues Default => new(string.Empty, string.Empty, "デフォルト", "audio");
 }
@@ -18,7 +18,9 @@ public sealed record SettingsLegacyAutoDefaults(string? InputDir, string? Output
 public sealed record SettingsReadResult(
     SettingsValues Values,
     IReadOnlyDictionary<string, JsonElement> ExtensionFields,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<string> Warnings,
+    bool RequiresOutputMigration = false,
+    string? SavedLastMode = null);
 
 /// <summary>
 /// Reads and writes the shared settings.json contract without depending on Avalonia.
@@ -28,7 +30,11 @@ public sealed class SettingsStore
 {
     public const int CurrentSchemaVersion = 2;
 
-    private static readonly string[] CanonicalFieldNames = ["version", "inputDir", "outputDir", "lastPreset", "lastMode"];
+    private static readonly string[] CanonicalFieldNames = ["version", "inputDir", "outputDir", "lastPreset", "lastMode", "lastOutputSelection"];
+    private static readonly string[] OutputSelections =
+        ["auto", "mp4", "original-video", "audio-and-video", "mp3", "m4a", "aac", "flac", "wav", "opus", "ogg"];
+
+    public static bool IsOutputSelection(string? value) => OutputSelections.Contains(value, StringComparer.Ordinal);
     private static readonly JsonSerializerOptions SaveOptions = new() { WriteIndented = true };
 
     private readonly string _settingsPath;
@@ -142,10 +148,22 @@ public sealed class SettingsStore
             {
                 values = values with { LastPreset = lastPreset };
             }
-            if (TryFindProperty(root, "lastMode", out var modeElement) && TryGetTruthyString(modeElement, out var lastMode) &&
-                new[] { "audio", "video", "both" }.Contains(lastMode, StringComparer.OrdinalIgnoreCase))
+            var hasSavedMode = TryFindProperty(root, "lastMode", out var modeElement) &&
+                modeElement.ValueKind == JsonValueKind.String &&
+                new[] { "audio", "video", "both" }.Contains(modeElement.GetString(), StringComparer.OrdinalIgnoreCase);
+            if (hasSavedMode)
+                values = values with { LastMode = modeElement.GetString()!.ToLowerInvariant() };
+            var hasOutput = TryFindProperty(root, "lastOutputSelection", out var outputSelection);
+            var warnings = Array.Empty<string>();
+            if (hasOutput)
             {
-                values = values with { LastMode = lastMode };
+                var selection = outputSelection.ValueKind == JsonValueKind.String ? outputSelection.GetString() : null;
+                if (IsOutputSelection(selection)) values = values with { LastOutputSelection = selection };
+                else
+                {
+                    values = values with { LastOutputSelection = "auto" };
+                    warnings = ["[WARN ] 保存された出力形式が不正なため「自動」で起動します。"];
+                }
             }
 
             if (version < 2 && legacyAutoDefaults is not null)
@@ -160,7 +178,8 @@ public sealed class SettingsStore
                 }
             }
 
-            return new SettingsReadResult(values, extensions, Array.Empty<string>());
+            return new SettingsReadResult(values, extensions, warnings, hasSavedMode && !hasOutput,
+                hasSavedMode ? values.LastMode : null);
         }
     }
 
@@ -173,9 +192,10 @@ public sealed class SettingsStore
             ["version"] = CurrentSchemaVersion,
             ["inputDir"] = values.InputDir,
             ["outputDir"] = values.OutputDir,
-            ["lastPreset"] = values.LastPreset,
-            ["lastMode"] = values.LastMode
+            ["lastPreset"] = values.LastPreset
         };
+        if (values.LastMode is not null) payload["lastMode"] = values.LastMode;
+        if (values.LastOutputSelection is not null) payload["lastOutputSelection"] = values.LastOutputSelection;
 
         if (extensionFields is not null)
         {
@@ -194,7 +214,16 @@ public sealed class SettingsStore
             Directory.CreateDirectory(directory);
         }
 
-        File.WriteAllText(_settingsPath, JsonSerializer.Serialize(payload, SaveOptions), new UTF8Encoding(false));
+        var temporary = _settingsPath + ".tmp-" + Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
+        try
+        {
+            File.WriteAllText(temporary, JsonSerializer.Serialize(payload, SaveOptions), new UTF8Encoding(false));
+            File.Move(temporary, _settingsPath, overwrite: true);
+        }
+        finally
+        {
+            File.Delete(temporary);
+        }
     }
 
     private static string RequirePath(string path)

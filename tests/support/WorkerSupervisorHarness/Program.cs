@@ -79,6 +79,135 @@ await using (var heldJobLock = new FileStream(jobLockPath, FileMode.OpenOrCreate
     }
 }
 
+var legacyWorkerPath = Path.Combine(tempRoot, "legacy-worker.ps1");
+await File.WriteAllTextAsync(legacyWorkerPath, """
+$null = [Console]::In.ReadLine()
+[Console]::Out.WriteLine('{"schemaVersion":1,"type":"error","code":"INVALID_COMMAND","message":"unexpected field: outputSelectionProtocol"}')
+[Console]::Out.Flush()
+exit 2
+""");
+using (var legacySupervisor = new WorkerSupervisor(tempRoot, pwshPath, legacyWorkerPath))
+{
+    var legacyResult = await legacySupervisor.RunAsync(new Dictionary<string, object?>(StringComparer.Ordinal)
+    {
+        ["schemaVersion"] = 1,
+        ["id"] = Guid.NewGuid().ToString("D"),
+        ["cmd"] = "capabilities",
+        ["outputSelectionProtocol"] = true
+    });
+    if (legacyResult.ExitCode != 2 || legacyResult.RecoveryRequired)
+    {
+        Console.Error.WriteLine($"A 1.1.0 worker rejecting the output-selection protocol was not reported as a clean version mismatch: exit={legacyResult.ExitCode}, recovery={legacyResult.RecoveryRequired}");
+        return 1;
+    }
+}
+var afterMismatch = await supervisor.RunAsync(new Dictionary<string, object?>(StringComparer.Ordinal)
+{
+    ["schemaVersion"] = 1,
+    ["id"] = Guid.NewGuid().ToString("D"),
+    ["cmd"] = "capabilities",
+    ["outputSelectionProtocol"] = true
+});
+if (afterMismatch.ExitCode != 0 || afterMismatch.RecoveryRequired)
+{
+    Console.Error.WriteLine($"A version mismatch blocked later work: exit={afterMismatch.ExitCode}, recovery={afterMismatch.RecoveryRequired}");
+    return 1;
+}
+
+var earlyCancelInput = Path.Combine(tempRoot, "early-cancel-input");
+Directory.CreateDirectory(earlyCancelInput);
+await File.WriteAllTextAsync(Path.Combine(earlyCancelInput, "a.wav"), "not media");
+string? earlyScanStatus = null;
+using (var earlyCancelSupervisor = new WorkerSupervisor(tempRoot, pwshPath, workerPath, message =>
+{
+    if (message.GetProperty("type").GetString() == "scan-result") earlyScanStatus = message.GetProperty("status").GetString();
+}))
+using (var alreadyCancelled = new CancellationTokenSource())
+{
+    alreadyCancelled.Cancel();
+    WorkerSupervisorResult earlyResult;
+    try
+    {
+        earlyResult = await earlyCancelSupervisor.RunAsync(new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["schemaVersion"] = 1,
+            ["id"] = Guid.NewGuid().ToString("D"),
+            ["cmd"] = "scan",
+            ["paths"] = new[] { earlyCancelInput },
+            ["recurse"] = true,
+            ["outputSelection"] = "mp3",
+            ["audioOutputFormat"] = "mp3",
+            ["outputDir"] = Path.Combine(tempRoot, "early-cancel-output"),
+            ["analyzeOnly"] = false,
+            ["preserveHierarchy"] = true,
+            ["collisionPolicy"] = "rename"
+        }, alreadyCancelled.Token);
+    }
+    catch (OperationCanceledException exception)
+    {
+        Console.Error.WriteLine($"Cancellation before the worker received its command escaped as an exception: {exception.Message}");
+        return 1;
+    }
+    using var earlyRecord = JsonDocument.Parse(await File.ReadAllTextAsync(recordPath));
+    if (earlyResult.ExitCode != 0 || earlyResult.RecoveryRequired || earlyScanStatus != "cancelled" ||
+        earlyRecord.RootElement.GetProperty("status").GetString() != "completed")
+    {
+        Console.Error.WriteLine($"Cancellation before the worker received its command was not a clean cancelled scan: exit={earlyResult.ExitCode}, recovery={earlyResult.RecoveryRequired}, scan={earlyScanStatus}, record={earlyRecord.RootElement.GetProperty("status").GetString()}");
+        return 1;
+    }
+}
+
+if (OperatingSystem.IsMacOS() || OperatingSystem.IsLinux())
+{
+    var stalledWorkerPath = Path.Combine(tempRoot, "stalled-input-worker.ps1");
+    await File.WriteAllTextAsync(stalledWorkerPath, """
+param([string]$StorageRoot)
+[IO.File]::WriteAllText((Join-Path $StorageRoot 'stalled-worker-pid.txt'), [string]$PID)
+Start-Sleep -Seconds 20
+""");
+    using var stalledSupervisor = new WorkerSupervisor(tempRoot, pwshPath, stalledWorkerPath);
+    using var cancelDuringSend = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+    // A valid request below the protocol limit and larger than the stdin pipe buffer.
+    var paths = Enumerable.Range(0, 1500)
+        .Select(index => Path.Combine(earlyCancelInput, $"clip-{index:D4}-{new string('x', 140)}.wav")).ToArray();
+    var timer = Stopwatch.StartNew();
+    var timeoutResult = await stalledSupervisor.RunAsync(new Dictionary<string, object?>(StringComparer.Ordinal)
+    {
+        ["cmd"] = "scan",
+        ["paths"] = paths,
+        ["recurse"] = true,
+        ["outputSelection"] = "mp3",
+        ["audioOutputFormat"] = "mp3",
+        ["outputDir"] = Path.Combine(tempRoot, "stalled-output"),
+        ["analyzeOnly"] = false,
+        ["preserveHierarchy"] = true,
+        ["collisionPolicy"] = "rename"
+    }, cancelDuringSend.Token);
+    var pidFile = Path.Combine(tempRoot, "stalled-worker-pid.txt");
+    using var timeoutRecord = JsonDocument.Parse(await File.ReadAllTextAsync(recordPath));
+    if (!File.Exists(pidFile) || timeoutResult.ExitCode != 1 || timeoutResult.RecoveryRequired ||
+        !timeoutResult.StandardError.Contains("初回コマンド送信がタイムアウト", StringComparison.Ordinal) ||
+        timeoutRecord.RootElement.GetProperty("status").GetString() != "completed" ||
+        timer.Elapsed >= TimeSpan.FromSeconds(15))
+    {
+        Console.Error.WriteLine($"Stalled initial send did not time out and recover: elapsed={timer.Elapsed}, exit={timeoutResult.ExitCode}, recovery={timeoutResult.RecoveryRequired}, stderr={timeoutResult.StandardError}");
+        return 1;
+    }
+    var stalledPid = int.Parse(await File.ReadAllTextAsync(pidFile), System.Globalization.CultureInfo.InvariantCulture);
+    if (ProcessExists(stalledPid))
+    {
+        Console.Error.WriteLine($"Initial send timeout left worker PID {stalledPid} alive.");
+        return 1;
+    }
+    var afterTimeout = await supervisor.RunAsync(new Dictionary<string, object?> { ["cmd"] = "capabilities" });
+    if (afterTimeout.ExitCode != 0 || afterTimeout.RecoveryRequired)
+    {
+        Console.Error.WriteLine("Initial send timeout blocked the next request.");
+        return 1;
+    }
+    Console.WriteLine($"Initial send timed out, recovered the worker and allowed the next request ({timer.Elapsed.TotalSeconds:F1}s).");
+}
+
 var truncatedWorkerPath = Path.Combine(tempRoot, "truncated-worker.ps1");
 await File.WriteAllTextAsync(truncatedWorkerPath, """
 $command = [Console]::In.ReadLine() | ConvertFrom-Json -AsHashtable
@@ -358,3 +487,17 @@ if (!newWorkBlocked)
 
 Console.WriteLine("Worker protocol, job-conflict exit 3, incomplete-stream handling, RECOVERY_REQUIRED exit 4, in-host and restart recovery, TERM/KILL, cleanup, and fail-closed suppression passed.");
 return 0;
+
+
+static bool ProcessExists(int processId)
+{
+    try
+    {
+        using var process = Process.GetProcessById(processId);
+        return !process.HasExited;
+    }
+    catch (ArgumentException)
+    {
+        return false;
+    }
+}

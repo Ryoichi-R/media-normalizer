@@ -52,6 +52,18 @@ Describe 'Worker protocol contract' {
         (Test-MediaNormalizerWorkerEvent -Message $progress).IsValid | Should -BeFalse
     }
 
+    It 'rejects mixed legacy and planned commands, and cancelled results with rows' {
+        $scan = Get-Content -LiteralPath (Join-Path $script:fixtureRoot 'command-planned-scan.json') -Raw | ConvertFrom-Json -AsHashtable
+        $scan.mode = 'both'
+        (Test-MediaNormalizerWorkerCommand -Message $scan).IsValid | Should -BeFalse
+
+        $event = Get-Content -LiteralPath (Join-Path $script:fixtureRoot 'event-planned-scan-result.json') -Raw | ConvertFrom-Json -AsHashtable
+        $event.status = 'cancelled'
+        (Test-MediaNormalizerWorkerEvent -Message $event).IsValid | Should -BeFalse
+        $event.files = @()
+        (Test-MediaNormalizerWorkerEvent -Message $event).IsValid | Should -BeTrue
+    }
+
     It 'rejects stale process acknowledgements and out-of-range progress' {
         $ack = Get-Content -LiteralPath (Join-Path $script:fixtureRoot 'command-process-registration-ack.json') -Raw | ConvertFrom-Json -AsHashtable
         $ack.accepted = 'yes'

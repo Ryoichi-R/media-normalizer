@@ -10,13 +10,13 @@ BeforeAll {
 }
 
 Describe 'Settings schema 2 PowerShell contract' {
-    It 'schema describes the five canonical fields and permits forward extension fields' {
+    It 'schema describes the shared and Mac output fields and permits forward extension fields' {
         $schema = Get-Content -LiteralPath (Join-Path $script:repoRoot 'contracts/settings.schema.json') -Raw |
             ConvertFrom-Json -AsHashtable
         $schema.properties.version.type | Should -Be 'integer'
         $schema.properties.lastMode.enum | Should -Contain 'audio'
         $schema.additionalProperties | Should -BeTrue
-        @($schema.properties.Keys | Sort-Object) | Should -Be @('inputDir', 'lastMode', 'lastPreset', 'outputDir', 'version')
+        @($schema.properties.Keys | Sort-Object) | Should -Be @('inputDir', 'lastMode', 'lastOutputSelection', 'lastPreset', 'outputDir', 'version')
     }
 
     It 'reads schema 2 known fields and retains an unknown extension object separately' {

@@ -413,7 +413,7 @@ Describe 'Invoke-Normalize integration' -Tag 'Integration' -Skip:(-not ($ffmpegA
 
         $cmdLine = @($logs | Where-Object { $_ -match '\[CMD\].*setpts=' }) | Select-Object -First 1
         $cmdLine | Should -Not -BeNullOrEmpty
-        ($cmdLine -match '(media-normalizer-speed-[0-9a-fA-F]+\.\w+)') | Should -BeTrue
+        ($cmdLine -match '(media-normalizer-(?:[0-9a-fA-F-]+-)?speed-[0-9a-fA-F]+\.\w+)') | Should -BeTrue
         $tempFileName = $Matches[1]
         $tempPath = Join-Path ([IO.Path]::GetTempPath()) $tempFileName
         Test-Path -LiteralPath $tempPath | Should -BeFalse
@@ -447,7 +447,7 @@ Describe 'Invoke-Normalize integration' -Tag 'Integration' -Skip:(-not ($ffmpegA
             -Logger {
                 param($m)
                 $logs.Add($m) | Out-Null
-                if ($m -match '\[CMD\].*setpts=' -and $m -match '(media-normalizer-speed-[0-9a-fA-F]+\.\w+)') {
+                if ($m -match '\[CMD\].*setpts=' -and $m -match '(media-normalizer-(?:[0-9a-fA-F-]+-)?speed-[0-9a-fA-F]+\.\w+)') {
                     $script:speedTempPath = Join-Path ([IO.Path]::GetTempPath()) $Matches[1]
                 }
                 if ($m -match '^\s*\[CMD\]' -and $m -notmatch 'setpts=') {
