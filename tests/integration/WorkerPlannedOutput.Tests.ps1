@@ -95,6 +95,36 @@ $script:toolsAvailable = [bool](Get-Command ffmpeg -ErrorAction SilentlyContinue
 $script:posix = -not $IsWindows
 
 Describe 'Planned output selection through the worker' -Tag 'Integration' -Skip:(-not $script:toolsAvailable) {
+    It 'reports target failure without replacing an output, and reports a separate report-write failure' {
+        $source = New-ToneMedia (Join-Path $TestDrive 'quality/in/tone.wav')
+        $outputDir = (New-Item -ItemType Directory (Join-Path $TestDrive 'quality/out') -Force).FullName
+        $destination = Join-Path $outputDir 'tone.wav'
+        [IO.File]::Copy($source, $destination)
+        $original = (Get-FileHash -LiteralPath $destination).Hash
+        $scan = New-WorkerPlannedScanCommand -Paths @($source) -OutputSelection wav -OutputDir $outputDir -CollisionPolicy overwrite
+        $scanResult = Invoke-PlannedScan $scan
+
+        $command = New-WorkerPlannedNormalizeCommand -Scan $scan -ScanResult $scanResult -SelectedPaths @($source)
+        $command.target = -5
+        $command.truePeak = -9
+        $failure = Invoke-PlannedWorker $command
+        $failure.ExitCode | Should -Be 1
+        (Get-RunDone $failure).fail | Should -Be 1
+        (Get-FileDone $failure $source).status | Should -Be 'failed'
+        (Get-FileDone $failure $source).outputPath | Should -BeNullOrEmpty
+        (Get-FileHash -LiteralPath $destination).Hash | Should -Be $original
+
+        $command = New-WorkerPlannedNormalizeCommand -Scan $scan -ScanResult $scanResult -SelectedPaths @($source)
+        $command.reportPath = (New-Item -ItemType Directory (Join-Path $outputDir 'blocked.json')).FullName
+        $reportFailure = Invoke-PlannedWorker $command
+        $reportFailure.ExitCode | Should -Be 1
+        (Get-RunDone $reportFailure).success | Should -Be 1
+        (Get-RunDone $reportFailure).reportSucceeded | Should -BeFalse
+        (Get-FileDone $reportFailure $source).status | Should -Be 'normalized'
+        (Get-FileHash -LiteralPath $destination).Hash | Should -Not -Be $original
+        (Get-FileHash -LiteralPath $source).Hash | Should -Be $original
+    }
+
     It 'writes only the explicitly selected format at 140% speed (<Selection>)' -ForEach @(
         @{ Selection = 'mp3'; Expected = @('clip.mp3'); Streams = @('audio:mp3') }
         @{ Selection = 'mp4'; Expected = @('clip.mp4'); Streams = @('video:h264', 'audio:aac') }

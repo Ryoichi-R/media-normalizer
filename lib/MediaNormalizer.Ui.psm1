@@ -252,6 +252,7 @@ $script:UiNormalizeWorker = {
     Import-Module $probeModulePath -Force
     Import-Module $progressModulePath -Force
     $coreState = New-MediaNormalizerState
+    if ($dto.PSObject.Properties['CachedFiles']) { $coreState.CachedFiles = @($dto.CachedFiles) }
     $coreState.DurationMap = @{}
     foreach ($entry in $dto.DurationMap.GetEnumerator()) { $coreState.DurationMap[[string]$entry.Key] = [double]$entry.Value }
     $logger = {
@@ -826,9 +827,11 @@ function Update-FileList {
         if ($State.Controls.ContainsKey('ChkRecurse')) {
             $recurse = [bool]$State.Controls.ChkRecurse.Checked
         }
+        $outputDir = if ($State.Controls.ContainsKey('TxtOutput')) { $State.Controls.TxtOutput.Text.Trim() }
         $files = Get-InputFiles `
             -InputDir $inputDir `
-            -InputPaths $selectedPaths `
+            -InputPaths $selectedPaths -OutputDir $outputDir `
+            -Logger { param($message) Write-Log -State $State -Message $message } `
             -Recurse:$recurse
     } catch {
         Clear-FileListWithError -State $State -Message "ファイル列挙に失敗: $($_.Exception.Message)"
@@ -1114,6 +1117,12 @@ function Register-MainFormEventHandlers {
             "用途/根拠: $(& $getPresetRationaleTextFn -Preset $selectedPreset)",
             '',
             "現在値: $($cc.NumTarget.Value) LUFS / $($cc.NumTP.Value) dBTP / $($cc.CmbAudioFormat.SelectedItem)",
+            $(if (-not $cc.ChkAnalyzeOnly.Checked -and $cc.NumTarget.Value -ge $cc.NumTP.Value) {
+                '目標 LUFS が True Peak 上限以上のため、適合できない場合があります。'
+            }),
+            $(if (-not $cc.ChkAnalyzeOnly.Checked -and [string]$cc.CmbAudioFormat.SelectedItem -eq 'opus') {
+                (Get-AudioOutputProfile -Format opus -SampleRate ([string]$cc.CmbSR.SelectedItem)).SampleRateReason
+            }),
             $configurationWarning,
             '',
             'この設定で続行しますか？'
@@ -1191,6 +1200,7 @@ function Register-MainFormEventHandlers {
             Bitrate = [string]$cc.CmbBR.SelectedItem
             SampleRate = [string]$cc.CmbSR.SelectedItem
             CollisionPolicy = $policy
+            CachedFiles = @($stateRef.CachedFiles)
             Stages = $stageList.ToArray()
             DurationMap = @{}
             SpeedPercentByPath = $speedResult.Values
@@ -1954,6 +1964,11 @@ function New-MainForm {
         $stateRef.Controls.LblSummary.Text = '入力パスが変更されました。[確認] を押してください'
         $stateRef.ScanValid = $false
         $stateRef.CachedFiles = @()
+    }.GetNewClosure())
+
+    $txtOutput.Add_TextChanged({
+        $stateRef.ScanValid = $false
+        $stateRef.Controls.LblSummary.Text = '出力パスが変更されました。[確認] を押してください'
     }.GetNewClosure())
 
     Register-MainFormEventHandlers -State $State -Form $form

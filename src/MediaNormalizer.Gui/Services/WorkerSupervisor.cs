@@ -715,8 +715,8 @@ public sealed class WorkerSupervisor : IDisposable
             "file-start" => (new[] { "schemaVersion", "type", "runId", "fileIndex", "total", "inputPath" }, new[] { "schemaVersion", "type", "runId", "fileIndex", "total", "inputPath" }),
             "progress" => (new[] { "schemaVersion", "type", "runId", "percent", "phase", "eta", "inputPath" }, new[] { "schemaVersion", "type", "runId", "percent", "phase", "eta", "inputPath" }),
             "log" => (new[] { "schemaVersion", "type", "runId", "level", "message" }, new[] { "schemaVersion", "type", "runId", "level", "message" }),
-            "file-done" => (new[] { "schemaVersion", "type", "runId", "inputPath", "outputPath", "status", "measurements", "message" }, new[] { "schemaVersion", "type", "runId", "inputPath", "outputPath", "status", "measurements", "message" }),
-            "run-done" => (new[] { "schemaVersion", "type", "runId", "success", "analyzed", "fail", "skipped", "cancelled", "reportPath", "reportSucceeded" }, new[] { "schemaVersion", "type", "runId", "success", "analyzed", "fail", "skipped", "cancelled", "reportPath", "reportSucceeded" }),
+            "file-done" => (new[] { "schemaVersion", "type", "runId", "inputPath", "outputPath", "status", "measurements", "message" }, new[] { "schemaVersion", "type", "runId", "inputPath", "outputPath", "status", "measurements", "message", "skipReason" }),
+            "run-done" => (new[] { "schemaVersion", "type", "runId", "success", "analyzed", "fail", "skipped", "cancelled", "reportPath", "reportSucceeded" }, new[] { "schemaVersion", "type", "runId", "success", "analyzed", "fail", "skipped", "cancelled", "reportPath", "reportSucceeded", "skipReasonCounts" }),
             "error" => (new[] { "schemaVersion", "type", "code", "message" }, new[] { "schemaVersion", "type", "runId", "inputPath", "code", "message" }),
             "process-starting" => (new[] { "schemaVersion", "type", "runId", "processToken", "executablePath", "arguments", "parentProcessId", "parentStartedAtUtc" }, new[] { "schemaVersion", "type", "runId", "processToken", "executablePath", "arguments", "parentProcessId", "parentStartedAtUtc" }),
             "process-started" => (new[] { "schemaVersion", "type", "runId", "processToken", "processId", "processStartedAtUtc", "executablePath", "parentProcessId", "parentStartedAtUtc" }, new[] { "schemaVersion", "type", "runId", "processToken", "processId", "processStartedAtUtc", "executablePath", "parentProcessId", "parentStartedAtUtc" }),
@@ -790,6 +790,17 @@ public sealed class WorkerSupervisor : IDisposable
                 RequireEventEnum(message, "status", "normalized", "analyzed", "skipped", "failed", "cancelled");
                 RequireObjectOrNull(message, "measurements");
                 RequireStringOrNull(message, "message");
+                if (message.TryGetProperty("skipReason", out var skipReason))
+                {
+                    if (message.GetProperty("status").GetString() == "skipped")
+                    {
+                        RequireEventEnum(message, "skipReason", "collision", "already-compliant", "silent");
+                        if ((message.GetProperty("outputPath").ValueKind != JsonValueKind.Null) != (skipReason.GetString() == "already-compliant"))
+                            throw new InvalidDataException("RECOVERY_REQUIRED: skipReason does not match the skipped result.");
+                    }
+                    else if (skipReason.ValueKind != JsonValueKind.Null)
+                        throw new InvalidDataException("RECOVERY_REQUIRED: skipReason must be null for other results.");
+                }
                 break;
             case "run-done":
                 RequireEventInt(message, "success", 0);
@@ -799,6 +810,20 @@ public sealed class WorkerSupervisor : IDisposable
                 RequireEventInt(message, "cancelled", 0);
                 RequireStringOrNull(message, "reportPath");
                 RequireBooleanOrNull(message, "reportSucceeded");
+                if (message.TryGetProperty("skipReasonCounts", out var counts))
+                {
+                    string[] reasons = ["collision", "already-compliant", "silent"];
+                    if (counts.ValueKind != JsonValueKind.Object || counts.EnumerateObject().Count() != reasons.Length)
+                        throw new InvalidDataException("RECOVERY_REQUIRED: skipReasonCounts must contain the three skip reasons.");
+                    long sum = 0;
+                    foreach (var reason in reasons)
+                    {
+                        RequireEventInt(counts, reason, 0);
+                        sum += counts.GetProperty(reason).GetInt32();
+                    }
+                    if (sum != message.GetProperty("skipped").GetInt32())
+                        throw new InvalidDataException("RECOVERY_REQUIRED: skipReasonCounts must sum to skipped.");
+                }
                 break;
             case "error":
                 if (message.TryGetProperty("inputPath", out _)) RequireEventString(message, "inputPath");

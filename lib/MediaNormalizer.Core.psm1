@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 Import-Module (Join-Path $PSScriptRoot 'MediaNormalizer.Platform.psm1') -Scope Local -DisableNameChecking
 
 # 入力ファイル候補の拡張子リスト（モジュールスコープで一箇所に集約）。
@@ -11,11 +11,15 @@ $script:AudioInputExtensions = @(
 )
 $script:VideoInputExtensions = @('.mp4', '.mov', '.mkv')
 $script:AudioOutputFormats = @('mp3', 'm4a', 'aac', 'flac', 'wav', 'opus', 'ogg')
+$script:OutputLoudnessToleranceLu = 0.5
+$script:LoudnessComparisonEpsilon = 0.000001
 
 # FFmpeg loudnorm フィルタの受理範囲（実測で確認済み。GUI/CLI/処理入口の3層が
 # 同じ範囲を参照する単一の正とする）。
 $script:LoudnessTargetRange = @{ Min = -70.0; Max = -5.0 }
 $script:LoudnessTruePeakRange = @{ Min = -9.0; Max = 0.0 }
+
+function Get-MediaNormalizerOutputLoudnessTolerance { return $script:OutputLoudnessToleranceLu }
 
 function Get-AudioInputExtensions { return $script:AudioInputExtensions }
 function Get-VideoInputExtensions { return $script:VideoInputExtensions }
@@ -65,6 +69,17 @@ function Test-LoudnessParameter {
     }
 }
 
+function ConvertTo-MediaSampleRate {
+    param([string]$SampleRate)
+
+    $rate = 0
+    if (-not [int]::TryParse($SampleRate, [Globalization.NumberStyles]::None,
+            [Globalization.CultureInfo]::InvariantCulture, [ref]$rate) -or $rate -le 0) {
+        throw "サンプルレートは正の整数で指定してください: $SampleRate"
+    }
+    return $rate
+}
+
 function Get-AudioOutputProfile {
     [CmdletBinding()]
     param(
@@ -85,8 +100,10 @@ function Get-AudioOutputProfile {
         ogg  = @{ Extension = '.ogg'; Codec = 'libvorbis';   Lossless = $false; UsesBitrate = $true }
     }
 
+    $requested = ConvertTo-MediaSampleRate $SampleRate
+    $effective = if ($Format -eq 'opus') { 48000 } else { $requested }
     $audioProfile = $profiles[$Format.ToLowerInvariant()]
-    $arguments = @('-c:a', $audioProfile.Codec, '-ar', $SampleRate)
+    $arguments = @('-c:a', $audioProfile.Codec, '-ar', [string]$effective)
     if ($audioProfile.UsesBitrate) {
         $arguments += @('-b:a', $Bitrate)
     }
@@ -97,6 +114,9 @@ function Get-AudioOutputProfile {
         Codec           = $audioProfile.Codec
         Lossless        = [bool]$audioProfile.Lossless
         UsesBitrate     = [bool]$audioProfile.UsesBitrate
+        RequestedSampleRate = $requested
+        EffectiveSampleRate = $effective
+        SampleRateReason = if ($requested -ne $effective) { 'Opus の出力は 48,000 Hz に統一します。' } else { $null }
         NormalizeArgs   = $arguments
     }
 }
@@ -171,34 +191,83 @@ function Resolve-MediaOutputDirectory {
     return $candidate
 }
 
+function Test-MediaPathDescendant {
+    param([string]$Parent, [string]$Child)
+
+    $comparison = if ((Get-MediaNormalizerPlatform) -eq 'Windows') {
+        [StringComparison]::OrdinalIgnoreCase
+    } else { [StringComparison]::Ordinal }
+    $separator = [IO.Path]::DirectorySeparatorChar
+    $prefix = $Parent.Normalize().TrimEnd($separator) + $separator
+    $childPath = $Child.Normalize()
+    return $childPath.Length -gt $prefix.Length -and $childPath.StartsWith($prefix, $comparison)
+}
+
 function Get-MediaInputFiles {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string[]]$InputPath,
-        [switch]$Recurse
+        [switch]$Recurse,
+        [string]$OutputDir,
+        [scriptblock]$Logger
     )
 
-    $files = [Collections.Generic.List[System.IO.FileInfo]]::new()
+    $files = [Collections.Generic.List[IO.FileInfo]]::new()
     $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    foreach ($item in $InputPath) {
-        if ([string]::IsNullOrWhiteSpace($item)) { continue }
-        $fullPath = [IO.Path]::GetFullPath($item)
-        if (Test-Path -LiteralPath $fullPath -PathType Leaf) {
-            if ($seen.Add($fullPath)) {
-                $files.Add([IO.FileInfo]::new($fullPath))
+    $outputPath = if ($OutputDir) { Resolve-MediaNormalizerDirectoryPath $OutputDir }
+    $sources = @(foreach ($path in $InputPath) {
+        if ([string]::IsNullOrWhiteSpace($path)) { continue }
+        Get-Item -LiteralPath ([IO.Path]::GetFullPath($path)) -Force -ErrorAction Stop
+    })
+    $sourceDirectories = @(foreach ($source in $sources) {
+        if ($source.PSIsContainer -and $outputPath) { Resolve-MediaNormalizerDirectoryPath $source.FullName }
+    })
+    $excludeOutput = @($sourceDirectories | Where-Object { Test-MediaPathDescendant $_ $outputPath }).Count -gt 0
+    $outputIdentity = $null
+    if ($outputPath -and $sourceDirectories.Count -gt 0 -and [IO.Directory]::Exists($OutputDir)) {
+        $outputIdentity = Get-MediaNormalizerFileIdentity $OutputDir
+        # Compare ancestor identities as well, so case variants on case-insensitive volumes are recognized.
+        if (-not $excludeOutput) {
+            $sourceIdentities = @($sourceDirectories | ForEach-Object { Get-MediaNormalizerFileIdentity $_ })
+            $ancestor = [IO.Path]::GetDirectoryName($outputPath)
+            while ($ancestor -and -not $excludeOutput) {
+                $excludeOutput = (Get-MediaNormalizerFileIdentity $ancestor) -in $sourceIdentities
+                $ancestor = [IO.Path]::GetDirectoryName($ancestor)
             }
+        }
+    }
+
+    foreach ($source in $sources) {
+        if ($excludeOutput) {
+            $directory = if ($source.PSIsContainer) { $source.FullName } else { $source.DirectoryName }
+            $resolved = Resolve-MediaNormalizerDirectoryPath $directory
+            if ($resolved -eq $outputPath -or (Test-MediaPathDescendant $outputPath $resolved) -or
+                ($outputIdentity -and (Get-MediaNormalizerFileIdentity $directory) -eq $outputIdentity)) {
+                throw "明示入力が出力フォルダの範囲内です。出力先または入力を変更してください: $($source.FullName)"
+            }
+        }
+        if (-not $source.PSIsContainer) {
+            if ($seen.Add($source.FullName)) { $files.Add($source) }
             continue
         }
-        if (-not (Test-Path -LiteralPath $fullPath -PathType Container)) {
-            throw "入力パスが見つかりません: $fullPath"
-        }
-        $children = if ($Recurse) {
-            Get-ChildItem -LiteralPath $fullPath -File -Recurse
-        } else {
-            Get-ChildItem -LiteralPath $fullPath -File
-        }
-        foreach ($child in $children) {
-            if ($seen.Add($child.FullName)) { $files.Add($child) }
+        $pending = [Collections.Generic.Stack[string]]::new()
+        $pending.Push($source.FullName)
+        while ($pending.Count -gt 0) {
+            $directory = $pending.Pop()
+            foreach ($file in Get-ChildItem -LiteralPath $directory -File) {
+                if ($seen.Add($file.FullName)) { $files.Add($file) }
+            }
+            if (-not $Recurse) { continue }
+            $children = @(Get-ChildItem -LiteralPath $directory -Directory)
+            for ($index = $children.Count - 1; $index -ge 0; $index--) {
+                $child = $children[$index]
+                if ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+                if ($excludeOutput -and $outputIdentity -and (Get-MediaNormalizerFileIdentity $child.FullName) -eq $outputIdentity) {
+                    if ($Logger) { & $Logger "[INFO ] 入力検索から出力フォルダを除外: $($child.FullName)" }
+                    continue
+                }
+                $pending.Push($child.FullName)
+            }
         }
     }
     return ,$files.ToArray()
@@ -548,8 +617,23 @@ function Complete-SafeOutput {
             throw
         }
     } else {
-        Move-Item -LiteralPath $temporaryFull -Destination $finalFull
+        [IO.File]::Move($temporaryFull, $finalFull)
     }
+}
+
+function ConvertFrom-LoudnessMeasurement {
+    param($Stats, [string]$Field, [string]$Label)
+
+    $property = $Stats.PSObject.Properties[$Field]
+    $raw = if ($property) { [string]$property.Value } else { '' }
+    if ($raw -ceq '-inf') { return $null }
+    $value = 0.0
+    if (-not [double]::TryParse($raw, [Globalization.NumberStyles]::Float,
+            [Globalization.CultureInfo]::InvariantCulture, [ref]$value) -or
+        [double]::IsNaN($value) -or [double]::IsInfinity($value)) {
+        throw "$Label が不正です: $raw"
+    }
+    return $value
 }
 
 function Get-MediaLoudnessAnalysis {
@@ -590,6 +674,7 @@ function Get-MediaLoudnessAnalysis {
         $arguments = @(
             '-hide_banner',
             '-nostats',
+            '-xerror',
             '-v', 'info',
             '-i', $FilePath,
             '-map', "0:a:$audioIndex",
@@ -632,28 +717,18 @@ function Get-MediaLoudnessAnalysis {
             throw "ラウドネス解析結果を解析できません: $FilePath (audio=$audioIndex)"
         }
 
-        $integrated = 0.0
-        $peak = 0.0
-        $range = 0.0
-        if (-not [double]::TryParse(
-                [string]$stats.input_i,
-                [Globalization.NumberStyles]::Float,
-                [Globalization.CultureInfo]::InvariantCulture,
-                [ref]$integrated)) {
-            throw "Integrated Loudness が不正です: $($stats.input_i)"
+        $integrated = ConvertFrom-LoudnessMeasurement $stats 'input_i' 'Integrated Loudness'
+        $peak = ConvertFrom-LoudnessMeasurement $stats 'input_tp' 'True Peak'
+        $range = ConvertFrom-LoudnessMeasurement $stats 'input_lra' 'Loudness Range'
+        $status = 'measured'
+        $reason = $null
+        if ($null -eq $integrated -and $null -eq $peak) {
+            $status = 'silent'
+            $reason = '無音'
+        } elseif ($null -eq $integrated -or $null -eq $peak) {
+            $status = 'unmeasurable'
+            $reason = 'ラウドネスまたは True Peak を測定できません。'
         }
-        if (-not [double]::TryParse(
-                [string]$stats.input_tp,
-                [Globalization.NumberStyles]::Float,
-                [Globalization.CultureInfo]::InvariantCulture,
-                [ref]$peak)) {
-            throw "True Peak が不正です: $($stats.input_tp)"
-        }
-        [void][double]::TryParse(
-            [string]$stats.input_lra,
-            [Globalization.NumberStyles]::Float,
-            [Globalization.CultureInfo]::InvariantCulture,
-            [ref]$range)
 
         $streams.Add([pscustomobject]@{
             AudioStreamIndex = $audioIndex
@@ -661,6 +736,8 @@ function Get-MediaLoudnessAnalysis {
             TruePeakDbtp     = $peak
             LoudnessRangeLu  = $range
             Threshold        = [string]$stats.input_thresh
+            measurementStatus = $status
+            measurementReason = $reason
         })
     }
 
@@ -682,6 +759,10 @@ function Test-NormalizationNeeded {
 
     $reasons = [Collections.Generic.List[string]]::new()
     foreach ($stream in @($Analysis.Streams)) {
+        if ($null -eq $stream.IntegratedLufs -or $null -eq $stream.TruePeakDbtp) {
+            $reasons.Add("audio[$($stream.AudioStreamIndex)] 測定値がありません。")
+            continue
+        }
         $delta = [math]::Abs([double]$stream.IntegratedLufs - $Target)
         if ($delta -gt $Tolerance) {
             $reasons.Add(
@@ -701,12 +782,61 @@ function Test-NormalizationNeeded {
     }
 }
 
+function Test-OutputLoudness {
+    param($Analysis, [double]$Target, [double]$TruePeak, [int]$AudioCount)
+
+    $errors = [Collections.Generic.List[string]]::new()
+    $streams = [Collections.Generic.List[object]]::new()
+    if (-not $Analysis -or @($Analysis.Streams).Count -ne $AudioCount) {
+        $errors.Add('出力の全音声トラックを測定できませんでした。')
+    } else {
+        for ($index = 0; $index -lt $AudioCount; $index++) {
+            $stream = $Analysis.Streams[$index]
+            $integrated = $stream.IntegratedLufs
+            $peak = $stream.TruePeakDbtp
+            $delta = $null
+            $reason = $null
+            if ($null -eq $integrated -or $null -eq $peak -or
+                [double]::IsNaN($integrated) -or [double]::IsInfinity($integrated) -or
+                [double]::IsNaN($peak) -or [double]::IsInfinity($peak)) {
+                $reason = '有限の LUFS と True Peak を測定できませんでした。'
+            } else {
+                $delta = $integrated - $Target
+                if ([math]::Abs($delta) -gt $script:OutputLoudnessToleranceLu + $script:LoudnessComparisonEpsilon -or
+                    $peak -gt $TruePeak + $script:LoudnessComparisonEpsilon) {
+                    $reason = "$integrated LUFS (目標 $Target ±$($script:OutputLoudnessToleranceLu) LU), $peak dBTP (上限 $TruePeak)"
+                }
+            }
+            if ($reason) { $errors.Add("audio[$index] $reason") }
+            $streams.Add([pscustomobject]@{
+                AudioStreamIndex = $index; IntegratedLufs = $integrated; TruePeakDbtp = $peak
+                DeltaLu = $delta; IsValid = -not $reason; Reason = $reason
+            })
+        }
+    }
+    return [pscustomobject]@{
+        IsValid = $errors.Count -eq 0; Errors = $errors.ToArray(); Streams = $streams.ToArray()
+        TargetLufs = $Target; TruePeakLimitDbtp = $TruePeak; ToleranceLu = $script:OutputLoudnessToleranceLu
+    }
+}
+
+function Get-MediaNormalizerSkipReasonCounts {
+    param([AllowEmptyCollection()][object[]]$Records)
+
+    $counts = [ordered]@{ collision = 0; 'already-compliant' = 0; silent = 0 }
+    foreach ($record in $Records) {
+        if ($record.PSObject.Properties['skipReason'] -and $record.skipReason) { $counts[$record.skipReason]++ }
+    }
+    return $counts
+}
+
 function Write-NormalizationReport {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Records,
-        [hashtable]$Configuration
+        [hashtable]$Configuration,
+        [scriptblock]$IsProtectedInput
     )
 
     $fullPath = [IO.Path]::GetFullPath($Path)
@@ -731,6 +861,7 @@ function Write-NormalizationReport {
             total     = @($Records).Count
             normalized = @($Records | Where-Object Action -eq 'normalized').Count
             skipped    = @($Records | Where-Object Action -eq 'skipped').Count
+            skipReasonCounts = Get-MediaNormalizerSkipReasonCounts $Records
             analyzed   = @($Records | Where-Object Action -eq 'analyzed').Count
             failed     = @($Records | Where-Object Action -eq 'failed').Count
         }
@@ -740,7 +871,10 @@ function Write-NormalizationReport {
     try {
         $payload | ConvertTo-Json -Depth 12 |
             Set-Content -LiteralPath $temporary -Encoding UTF8 -ErrorAction Stop
-        Move-Item -LiteralPath $temporary -Destination $fullPath -Force -ErrorAction Stop
+        if ($IsProtectedInput -and (& $IsProtectedInput $fullPath)) {
+            throw "レポート出力先が入力原本を指しています: $fullPath"
+        }
+        Complete-SafeOutput -TemporaryPath $temporary -FinalPath $fullPath
     } finally {
         if (Test-Path -LiteralPath $temporary) {
             Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
@@ -1810,6 +1944,41 @@ function Find-FfmpegNormalize {
     return $null
 }
 
+function New-MediaNormalizerInputProtection {
+    param([string[]]$Paths, [scriptblock]$AdditionalCheck)
+
+    $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $originalPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($path in $Paths) {
+        if (-not $path) { continue }
+        $fullPath = [IO.Path]::GetFullPath($path)
+        [void]$originalPaths.Add($fullPath)
+        [void]$names.Add($fullPath.Normalize())
+    }
+    [scriptblock]$identityForPath = ${function:Get-MediaNormalizerFileIdentity}
+    return {
+        param([string]$Path)
+        $fullPath = [IO.Path]::GetFullPath($Path)
+        if ($names.Contains($fullPath.Normalize())) { return $true }
+        if ($AdditionalCheck -and (& $AdditionalCheck $fullPath)) { return $true }
+        if (-not [IO.File]::Exists($fullPath) -and -not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { return $false }
+        try {
+            $destination = & $identityForPath $fullPath
+            foreach ($inputPath in $originalPaths) {
+                try {
+                    $source = & $identityForPath $inputPath
+                } catch [System.Management.Automation.ItemNotFoundException] {
+                    continue
+                }
+                if ($destination -eq $source) { return $true }
+            }
+        } catch {
+            throw "出力先が入力原本と異なることを確認できません。別名の出力先を指定してください: $fullPath ($($_.Exception.Message))"
+        }
+        return $false
+    }.GetNewClosure()
+}
+
 function Resolve-UniqueOutputPath {
     [CmdletBinding()]
     param(
@@ -1826,7 +1995,8 @@ function Resolve-UniqueOutputPath {
     if (-not $Extension.StartsWith('.')) { $Extension = '.' + $Extension }
     $original = Join-Path $Directory ($BaseName + $Extension)
 
-    $protected = $IsProtectedInput -and (& $IsProtectedInput $original)
+    $protected = $IsProtectedInput -and
+        ($Policy -eq 'overwrite' -or -not (Test-Path -LiteralPath $original)) -and (& $IsProtectedInput $original)
     if ($Policy -eq 'overwrite' -and $protected) {
         throw "出力先が入力原本を指しています: $original"
     }
@@ -1869,6 +2039,8 @@ function Get-NormalizationRunFiles {
         [string[]]$InputPaths,
         [System.IO.FileInfo[]]$TargetFiles,
         [bool]$Recurse = $true,
+        [string]$OutputDir,
+        [scriptblock]$Logger,
         [scriptblock]$GetTargetExtensions
     )
 
@@ -1881,7 +2053,7 @@ function Get-NormalizationRunFiles {
     } else {
         @($InputDir)
     }
-    $allFiles = Get-MediaInputFiles -InputPath $effectiveInputs -Recurse:$Recurse
+    $allFiles = Get-MediaInputFiles -InputPath $effectiveInputs -Recurse:$Recurse -OutputDir $OutputDir -Logger $Logger
     $extMap = if ($GetTargetExtensions) {
         & $GetTargetExtensions
     } else {
@@ -1926,6 +2098,14 @@ function New-NormalizationReportRecord {
         validation              = $null
         droppedAudioStreams     = 0
         reason                  = $null
+        skipReason              = $null
+        requestedSampleRate     = $null
+        effectiveSampleRate     = $null
+        sampleRateReason        = $null
+        encoderTruePeakDbtp     = $null
+        encoderTruePeakMarginDb = 0.0
+        encoderTruePeakReason   = $null
+        loudnessWarning         = $null
         error                   = $null
         speedIntermediateProfile = $null
     }
@@ -2075,6 +2255,7 @@ function Send-MediaNormalizerRunDoneEvent {
         analyzed = if ($Result.ContainsKey('Analyzed')) { [int]$Result.Analyzed } else { 0 }
         fail = [int]$Result.Fail
         skipped = [int]$Result.Skipped
+        skipReasonCounts = if ($Result.ContainsKey('SkipReasonCounts')) { $Result.SkipReasonCounts } else { Get-MediaNormalizerSkipReasonCounts @() }
         cancelled = [int]$Result.Cancelled
         reportPath = if ($Result.ContainsKey('ReportPath')) { $Result.ReportPath } else { $null }
         reportSucceeded = if ($Result.ContainsKey('ReportSucceeded')) { [bool]$Result.ReportSucceeded } else { $null }
@@ -2153,12 +2334,13 @@ function Send-MediaNormalizerFileDoneEvent {
         [AllowNull()][object]$OutputPath,
         [Parameter(Mandatory)][ValidateSet('normalized', 'analyzed', 'skipped', 'failed', 'cancelled')][string]$Status,
         [object]$Measurements,
+        [AllowNull()][object]$SkipReason,
         [AllowNull()][object]$Message
     )
 
     Send-MediaNormalizerStructuredEvent -EventSink $EventSink -Type file-done -Fields @{
         runId = $RunId; inputPath = $InputPath; outputPath = $OutputPath
-        status = $Status; measurements = $Measurements; message = $Message
+        status = $Status; measurements = $Measurements; skipReason = $SkipReason; message = $Message
     }
 }
 
@@ -2190,7 +2372,7 @@ function Complete-MediaNormalizerRunEarly {
 }
 
 function Save-NormalizationRunReport {
-    param($State, [string]$Mode, [string]$ReportMode, [scriptblock]$Logger, [hashtable]$Configuration)
+    param($State, [string]$Mode, [string]$ReportMode, [scriptblock]$Logger, [hashtable]$Configuration, [scriptblock]$IsProtectedInput)
 
     try {
         $reportModes = @($State.ReportRecords |
@@ -2209,13 +2391,70 @@ function Save-NormalizationRunReport {
         $writtenReport = Write-NormalizationReport `
             -Path $State.ReportPath `
             -Records $State.ReportRecords.ToArray() `
-            -Configuration $Configuration
+            -Configuration $Configuration -IsProtectedInput $IsProtectedInput
         & $Logger "[REPORT] $writtenReport"
         return @{ Succeeded = $true; Error = $null }
     } catch {
         $reportError = $_.Exception.Message
-        & $Logger "[WARN ] レポートの保存に失敗しました: $reportError"
+        $committedOutputs = @($State.ReportRecords | Where-Object { $_.outputPath }).Count
+        & $Logger "[WARN ] レポートの保存に失敗しました: $($State.ReportPath)。確定済み出力: $committedOutputs 件。$reportError"
         return @{ Succeeded = $false; Error = $reportError }
+    }
+}
+
+function Assert-NormalizationOutput {
+    param(
+        $Record, $InputInventory, $OutputInventory, $Mode, $OutExt, $EffectiveSampleRate,
+        [switch]$AllowAncillaryStreamDrop, $Analyzer, $WorkingOutPath, $Target, $TruePeak,
+        $State, $Logger, $Progress, $PumpEvents, [switch]$CliMode, $CancellationToken, $CurrentDur
+    )
+
+    $integrity = Compare-MediaInventory `
+        -InputInventory $inputInventory `
+        -OutputInventory $outputInventory `
+        -Mode $Mode `
+        -AllowAncillaryStreamDrop:$AllowAncillaryStreamDrop
+    $record.validation = $integrity
+    if (-not (Test-MediaNormalizerContainer $outputInventory $outExt.TrimStart('.')) -or
+        ($Mode -eq 'audio' -and $outputInventory.RealVideoCount -ne 0) -or
+        ($Mode -eq 'video' -and $outputInventory.RealVideoCount -lt 1)) {
+        $integrity.Errors += "出力のコンテナまたはストリームが指定形式と一致しません: $outExt"
+    }
+    if (@($outputInventory.StreamTags | Where-Object {
+                $_.Type -eq 'audio' -and [string]$_.SampleRate -ne [string]$effectiveSampleRate
+            }).Count -gt 0) {
+        $integrity.Errors += "出力のサンプルレートが指定の $effectiveSampleRate Hz と一致しません。"
+    }
+    $integrity.IsValid = $integrity.Errors.Count -eq 0
+    $record.droppedAudioStreams = [int]$integrity.DroppedAudioStreams
+    foreach ($warning in @($integrity.Warnings)) {
+        & $Logger "  [WARN ] $warning"
+    }
+    if (-not $integrity.IsValid) {
+        throw "出力検証に失敗しました: $($integrity.Errors -join '; ')"
+    }
+    try {
+        $record.after = if ($Analyzer) {
+            & $Analyzer $workingOutPath $Target $TruePeak
+        } else {
+            Get-MediaLoudnessAnalysis `
+                -FilePath $workingOutPath -Target $Target -TruePeak $TruePeak `
+                -State $State -Logger $Logger -Progress $Progress -PumpEvents $PumpEvents -CliMode:$CliMode `
+                -CancellationToken $CancellationToken -PreloadedInventory $outputInventory `
+                -CurrentFileDurationSec $currentDur -PhaseLabel '検証解析中'
+        }
+    } catch {
+        $integrity.IsValid = $false
+        $integrity.Errors += $_.Exception.Message
+        throw
+    }
+    $loudness = Test-OutputLoudness -Analysis $record.after -Target $Target -TruePeak $TruePeak `
+        -AudioCount $outputInventory.StreamCounts.audio
+    $integrity | Add-Member -NotePropertyName Loudness -NotePropertyValue $loudness
+    if (-not $loudness.IsValid) {
+        $integrity.IsValid = $false
+        $integrity.Errors += $loudness.Errors
+        throw "出力の音量が指定条件を満たしません: $($loudness.Errors -join '; ')"
     }
 }
 
@@ -2227,6 +2466,80 @@ function Assert-NormalizationDestination {
     }
     if ($IsProtectedInput -and (& $IsProtectedInput $Path)) {
         throw "出力先が入力原本を指しています: $Path"
+    }
+}
+
+function Write-NormalizationMeasurements {
+    param($Analysis, [scriptblock]$Logger)
+
+    $streams = @($Analysis.Streams)
+    $silentStreams = 0
+    $unmeasurableStreams = 0
+    foreach ($stream in $streams) {
+        $measurement = if ($stream.PSObject.Properties['measurementStatus']) { $stream.measurementStatus } else { 'measured' }
+        switch ($measurement) {
+            'silent' { $silentStreams++; $description = '無音' }
+            'unmeasurable' { $unmeasurableStreams++; $description = $stream.measurementReason }
+            default { $description = "$($stream.IntegratedLufs) LUFS / $($stream.TruePeakDbtp) dBTP" }
+        }
+        & $Logger "  [ANALYZE] audio[$($stream.AudioStreamIndex)] $description"
+    }
+
+    return @{ Total = $streams.Count; Silent = $silentStreams; Unmeasurable = $unmeasurableStreams }
+}
+
+function Get-NormalizationInputProtection {
+    param($State, $Files, $InputDir, $InputPaths, $OutputDir, $Recurse, $Planned, [scriptblock]$IsProtectedInput)
+
+    $protectionPaths = @(
+        if ($State.PSObject.Properties['CachedFiles']) { $State.CachedFiles | ForEach-Object FullName }
+        $Files | ForEach-Object FullName
+        if (-not $Planned -or -not $IsProtectedInput) {
+            $sourcePaths = if ($InputPaths) { $InputPaths } else { @($InputDir) }
+            $mediaExtensions = @(Get-AudioInputExtensions) + @(Get-VideoInputExtensions)
+            Get-MediaInputFiles -InputPath $sourcePaths -Recurse:$Recurse -OutputDir $OutputDir |
+                ForEach-Object { $_ } | Where-Object Extension -in $mediaExtensions | ForEach-Object FullName
+            $sourcePaths | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+        }
+    )
+    return (New-MediaNormalizerInputProtection -Paths $protectionPaths -AdditionalCheck $IsProtectedInput)
+}
+
+function Set-NormalizationSampleRateRecord {
+    param($Record, $OutputSettings, [scriptblock]$Logger)
+
+    $Record.requestedSampleRate = $OutputSettings.RequestedSampleRate
+    $Record.effectiveSampleRate = $OutputSettings.EffectiveSampleRate
+    if ($OutputSettings.AudioProfile -and $OutputSettings.AudioProfile.SampleRateReason) {
+        $Record.sampleRateReason = $OutputSettings.AudioProfile.SampleRateReason
+        & $Logger "  [INFO ] $($Record.sampleRateReason)"
+    }
+}
+
+function Get-NormalizationOutputSettings {
+    param($Mode, $AudioOutputFormat, $Bitrate, $SampleRate, $Target, $TruePeak,
+        $AnalyzeOnly, $SkipIfNormalized, $NormalizationTolerance, $Recurse, $PreserveHierarchy)
+
+    $requestedSampleRate = ConvertTo-MediaSampleRate $SampleRate
+    $audioProfile = if ($Mode -eq 'audio') { Get-AudioOutputProfile $AudioOutputFormat $Bitrate $SampleRate }
+    $effectiveSampleRate = if ($audioProfile) { $audioProfile.EffectiveSampleRate } else { $requestedSampleRate }
+    $encoderPeakLimit = if ($Mode -eq 'video' -or $AudioOutputFormat -in @('aac', 'm4a', 'opus')) {
+        [math]::Max($script:LoudnessTruePeakRange.Min, $TruePeak - 0.5)
+    } else { $TruePeak }
+    $copyTolerance = [math]::Min($NormalizationTolerance, $script:OutputLoudnessToleranceLu)
+    $configuration = @{
+        targetLufs = $Target; truePeakDbtp = $TruePeak; bitrate = $Bitrate; sampleRate = $SampleRate
+        audioOutputFormat = $AudioOutputFormat; analyzeOnly = [bool]$AnalyzeOnly
+        skipIfNormalized = $SkipIfNormalized; normalizationTolerance = $NormalizationTolerance
+        recurse = $Recurse; preserveHierarchy = $PreserveHierarchy
+        outputLoudnessToleranceLu = $script:OutputLoudnessToleranceLu; effectiveCopyToleranceLu = $copyTolerance
+    }
+    if ($Target -ge $TruePeak -and -not $AnalyzeOnly) {
+        $configuration.loudnessWarning = '目標 LUFS が True Peak 上限以上です。指定の組合せでは適合できない場合があります。'
+    }
+    return @{
+        AudioProfile = $audioProfile; RequestedSampleRate = $requestedSampleRate; EffectiveSampleRate = $effectiveSampleRate
+        EncoderPeakLimit = $encoderPeakLimit; CopyTolerance = $copyTolerance; Configuration = $configuration
     }
 }
 
@@ -2269,7 +2582,6 @@ function Invoke-Normalize {
     )
 
     if (-not $Logger) { $Logger = { param($m) Write-Host $m } }
-
     $planned = $null -ne $InputInventories
     $activeFileContext = [pscustomobject]@{ InputPath = $null }
     if ($EventSink) {
@@ -2288,6 +2600,16 @@ function Invoke-Normalize {
         }
         return (Complete-MediaNormalizerRunEarly $EventSink $RunId @{ Success = 0; Fail = 1; Cancelled = 0; Skipped = 0 })
     }
+
+    try {
+        $outputSettings = Get-NormalizationOutputSettings $Mode $AudioOutputFormat $Bitrate $SampleRate $Target $TruePeak `
+            $AnalyzeOnly $SkipIfNormalized $NormalizationTolerance $Recurse $PreserveHierarchy
+    } catch {
+        & $Logger "[ERROR] $($_.Exception.Message)"
+        return (Complete-MediaNormalizerRunEarly $EventSink $RunId @{ Success = 0; Fail = 1; Cancelled = 0; Skipped = 0 })
+    }
+    $configuration = $outputSettings.Configuration
+    if ($configuration['loudnessWarning']) { & $Logger "[WARN ] $($configuration.loudnessWarning)" }
 
     if ($Mode -eq 'audio') {
         & $Logger "=== 音声正規化モード（音声/動画 → $($AudioOutputFormat.ToUpperInvariant())）==="
@@ -2343,7 +2665,7 @@ function Invoke-Normalize {
             -InputDir $InputDir `
             -InputPaths $InputPaths `
             -TargetFiles $TargetFiles `
-            -Recurse:$Recurse `
+            -Recurse:$Recurse -OutputDir $OutputDir -Logger $Logger `
             -GetTargetExtensions $GetTargetExtensions)
 
     if ($files.Count -eq 0) {
@@ -2355,11 +2677,14 @@ function Invoke-Normalize {
         return (Complete-MediaNormalizerRunEarly $EventSink $RunId @{ Success = 0; Fail = 0; Cancelled = 0; Skipped = 0 })
     }
 
+    $isDestinationProtected = Get-NormalizationInputProtection $State $files $InputDir $InputPaths $OutputDir `
+        $Recurse $planned $IsProtectedInput
+
     & $Logger "[INFO ] 入力 : $InputDir"
     & $Logger "[INFO ] 出力 : $OutputDir"
     & $Logger "[INFO ] 対象ファイル: $($files.Count) 件"
     & $Logger "[INFO ] 再帰検索: $Recurse / 階層維持: $PreserveHierarchy"
-    & $Logger "[INFO ] 解析のみ: $([bool]$AnalyzeOnly) / 正規化不要スキップ: $SkipIfNormalized (許容差 $NormalizationTolerance LU)"
+    & $Logger "[INFO ] 解析のみ: $([bool]$AnalyzeOnly) / 正規化不要スキップ: $SkipIfNormalized (実効許容差 $($outputSettings.CopyTolerance) LU)"
     $defaultSpeedPercent = ConvertTo-SpeedPercent -Value $SpeedPercent
     if ($SpeedPercentByPath -and $SpeedPercentByPath.Count -gt 0) {
         & $Logger "[INFO ] 再生速度: ファイル別指定あり (50-200%)"
@@ -2368,8 +2693,8 @@ function Invoke-Normalize {
     }
     & $Logger "[INFO ] 処理開始... (policy=$CollisionPolicy)"
     & $Logger ''
-
     $ok = 0; $fail = 0; $cancelled = 0; $skipped = 0; $analyzed = 0
+    $firstRecord = $State.ReportRecords.Count
     $fileIndex = 0
     foreach ($f in $files) {
         $fileIndex++
@@ -2396,6 +2721,7 @@ function Invoke-Normalize {
             -File $f `
             -Mode $Mode `
             -AudioOutputFormat $AudioOutputFormat
+        $record.loudnessWarning = $configuration['loudnessWarning']
 
         try {
             if ($planned -and (Test-MediaNormalizerCancellationRequested -State $State -CancellationToken $CancellationToken)) {
@@ -2449,24 +2775,25 @@ function Invoke-Normalize {
                     -CurrentFileDurationSec $currentDur -PhaseLabel '解析中' -PreloadedInventory $inputInventory
             }
             $record.before = $beforeAnalysis
-            foreach ($stream in @($beforeAnalysis.Streams)) {
-                & $Logger (
-                    "  [ANALYZE] audio[$($stream.AudioStreamIndex)] " +
-                    "$($stream.IntegratedLufs) LUFS / $($stream.TruePeakDbtp) dBTP")
-            }
+            $measurements = Write-NormalizationMeasurements -Analysis $beforeAnalysis -Logger $Logger
 
             if ($AnalyzeOnly) {
                 $record.action = 'analyzed'
                 $analyzed++
                 & $Logger "[ANALYZED] $($f.Name)"
+            } elseif ($measurements.Total -gt 0 -and $measurements.Silent -eq $measurements.Total) {
+                $record.action = 'skipped'
+                $record.skipReason = 'silent'
+                $record.reason = '無音のため正規化対象外。指定した形式・速度変換も未実施。'
+                $skipped++
+                & $Logger "[SKIP  ] $($f.Name) — $($record.reason)"
+            } elseif ($measurements.Unmeasurable -gt 0) {
+                throw '測定不能の音声トラックがあるため、目標適合を確認できません。'
+            } elseif ($measurements.Silent -gt 0) {
+                throw '無音トラックと有音トラックが混在するため未対応です。'
             } else {
-                $audioProfile = if ($Mode -eq 'audio') {
-                    Get-AudioOutputProfile `
-                        -Format $AudioOutputFormat `
-                        -Bitrate $Bitrate `
-                        -SampleRate $SampleRate
-                } else { $null }
-                $outExt = if ($Mode -eq 'audio') { $audioProfile.Extension } else { $f.Extension.ToLowerInvariant() }
+                Set-NormalizationSampleRateRecord $record $outputSettings $Logger
+                $outExt = if ($Mode -eq 'audio') { $outputSettings.AudioProfile.Extension } else { $f.Extension.ToLowerInvariant() }
                 $inputRoot = if (Test-Path -LiteralPath $InputDir -PathType Container) {
                     $InputDir
                 } elseif (Test-Path -LiteralPath $InputDir -PathType Leaf) {
@@ -2490,12 +2817,12 @@ function Invoke-Normalize {
                     -BaseName $baseName `
                     -Extension $outExt `
                     -Policy $CollisionPolicy `
-                    -Logger $Logger -IsProtectedInput $IsProtectedInput
-                $record.outputPath = $expectedOutPath
+                    -Logger $Logger -IsProtectedInput $isDestinationProtected
 
                 if (-not $expectedOutPath) {
                     $record.action = 'skipped'
                     $record.reason = '既存出力ファイルとの衝突 (policy=skip)'
+                    $record.skipReason = 'collision'
                     $skipped++
                     & $Logger "  [SKIP  ] $($record.reason)"
                 } else {
@@ -2517,25 +2844,27 @@ function Invoke-Normalize {
                         -Analysis $beforeAnalysis `
                         -Target $Target `
                         -TruePeak $TruePeak `
-                        -Tolerance $NormalizationTolerance
+                        -Tolerance $outputSettings.CopyTolerance
                     $sameFormat = [string]::Equals(
                         $f.Extension,
                         $outExt,
                         [StringComparison]::OrdinalIgnoreCase)
-                    if ($planned) {
-                        $sameFormat = $sameFormat -and (Test-MediaNormalizerContainer $inputInventory $outExt.TrimStart('.')) -and
-                            ($Mode -eq 'video' -or $inputInventory.RealVideoCount -eq 0)
-                    }
+                    $sameFormat = $sameFormat -and (Test-MediaNormalizerContainer $inputInventory $outExt.TrimStart('.')) -and
+                        ($Mode -eq 'video' -or $inputInventory.RealVideoCount -eq 0)
+                    $inputRateMatches = @($inputInventory.StreamTags | Where-Object {
+                        $_.Type -eq 'audio' -and [string]$_.SampleRate -ne [string]$outputSettings.EffectiveSampleRate
+                    }).Count -eq 0
                     $canCopyWithoutEncoding = (
                         $SkipIfNormalized -and
                         -not $needResult.Needed -and
-                        $sameFormat -and
+                        $sameFormat -and $inputRateMatches -and
                         $currentSpeedPercent -eq 100)
 
                     if ($canCopyWithoutEncoding) {
                         Copy-Item -LiteralPath $f.FullName -Destination $workingOutPath
                         $record.action = 'skipped'
-                        $record.reason = "目標値との差が $NormalizationTolerance LU 以内かつ True Peak 上限内"
+                        $record.skipReason = 'already-compliant'
+                        $record.reason = "目標値との差が $($outputSettings.CopyTolerance) LU 以内で、True Peak・形式・サンプルレートが適合"
                         & $Logger "  [SKIP  ] 正規化不要: $($record.reason)"
                     } else {
                         $sourcePath = $f.FullName
@@ -2592,12 +2921,17 @@ function Invoke-Normalize {
                             $sourcePath = $speedTemp
                         }
 
+                        $record.encoderTruePeakDbtp = $outputSettings.EncoderPeakLimit
+                        if ($outputSettings.EncoderPeakLimit -lt $TruePeak) {
+                            $record.encoderTruePeakMarginDb = $TruePeak - $outputSettings.EncoderPeakLimit
+                            $record.encoderTruePeakReason = '非可逆エンコード後の True Peak 超過を抑えるため。'
+                        }
                         $ffArgs = New-FfmpegNormalizeArguments `
                             -Mode $Mode `
                             -InputPath $sourcePath `
                             -OutputPath $workingOutPath `
                             -Target $Target `
-                            -TruePeak $TruePeak `
+                            -TruePeak $outputSettings.EncoderPeakLimit `
                             -Bitrate $Bitrate `
                             -SampleRate $SampleRate `
                             -AudioOutputFormat $AudioOutputFormat
@@ -2633,40 +2967,21 @@ function Invoke-Normalize {
                     $outputInventory = Get-MediaInventory -FilePath $workingOutPath `
                         -State $State -Logger $Logger -Progress $Progress -PumpEvents $PumpEvents -CliMode:$CliMode `
                         -CancellationToken $CancellationToken
-                    if ($planned -and (-not (Test-MediaNormalizerContainer $outputInventory $outExt.TrimStart('.')) -or
-                        ($Mode -eq 'audio' -and $outputInventory.RealVideoCount -ne 0) -or
-                        ($Mode -eq 'video' -and $outputInventory.RealVideoCount -lt 1))) {
-                        throw "出力のコンテナまたはストリームが指定形式と一致しません: $outExt"
+                    $validationOptions = @{
+                        Record = $record; InputInventory = $inputInventory; OutputInventory = $outputInventory
+                        Mode = $Mode; OutExt = $outExt; EffectiveSampleRate = $outputSettings.EffectiveSampleRate
+                        AllowAncillaryStreamDrop = $Mode -eq 'video' -and $currentSpeedPercent -ne 100
+                        Analyzer = $Analyzer; WorkingOutPath = $workingOutPath; Target = $Target; TruePeak = $TruePeak
+                        State = $State; Logger = $Logger; Progress = $Progress; PumpEvents = $PumpEvents
+                        CliMode = $CliMode; CancellationToken = $CancellationToken; CurrentDur = $currentDur
                     }
-                    $integrity = Compare-MediaInventory `
-                        -InputInventory $inputInventory `
-                        -OutputInventory $outputInventory `
-                        -Mode $Mode `
-                        -AllowAncillaryStreamDrop:($Mode -eq 'video' -and $currentSpeedPercent -ne 100)
-                    $record.validation = $integrity
-                    $record.droppedAudioStreams = [int]$integrity.DroppedAudioStreams
-                    foreach ($warning in @($integrity.Warnings)) {
-                        & $Logger "  [WARN ] $warning"
-                    }
-                    if (-not $integrity.IsValid) {
-                        throw "出力検証に失敗しました: $($integrity.Errors -join '; ')"
-                    }
-                    $record.after = if ($Analyzer) {
-                        & $Analyzer $workingOutPath $Target $TruePeak
-                    } else {
-                        Get-MediaLoudnessAnalysis `
-                            -FilePath $workingOutPath `
-                            -Target $Target `
-                            -TruePeak $TruePeak `
-                            -State $State -Logger $Logger -Progress $Progress -PumpEvents $PumpEvents -CliMode:$CliMode `
-                            -CancellationToken $CancellationToken `
-                            -CurrentFileDurationSec $currentDur -PhaseLabel '検証解析中'
-                    }
-                    if ($planned) { Assert-NormalizationDestination $State $CancellationToken $IsProtectedInput $expectedOutPath }
+                    Assert-NormalizationOutput @validationOptions
+                    Assert-NormalizationDestination $State $CancellationToken $isDestinationProtected $expectedOutPath
                     $replaceAllowed = $CollisionPolicy -eq 'overwrite' -and
                         [IO.Path]::GetFileName($expectedOutPath) -ceq ($baseName + $outExt)
-                    Complete-SafeOutput -TemporaryPath $workingOutPath -FinalPath $expectedOutPath -NoReplace:($planned -and -not $replaceAllowed)
+                    Complete-SafeOutput -TemporaryPath $workingOutPath -FinalPath $expectedOutPath -NoReplace:(-not $replaceAllowed)
                     $workingOutPath = $null
+                    $record.outputPath = $expectedOutPath
 
                     if ($record.action -eq 'skipped') {
                         $skipped++
@@ -2679,7 +2994,7 @@ function Invoke-Normalize {
             }
         } catch {
             $record.error = $_.Exception.Message
-            if ($planned) { $record.outputPath = $null }
+            $record.skipReason = $null
             if (Test-MediaNormalizerCancellationRequested -State $State -CancellationToken $CancellationToken) {
                 $record.action = 'cancelled'
                 & $Logger "[CANCEL] $($f.Name) -- 実行中にキャンセルされました"
@@ -2705,7 +3020,7 @@ function Invoke-Normalize {
         if ($EventSink) {
             Send-MediaNormalizerFileDoneEvent -EventSink $EventSink -RunId $RunId -InputPath $f.FullName `
                 -OutputPath $record.outputPath -Status $record.action `
-                -Measurements @{ before = $record.before; after = $record.after } -Message $record.error
+                -Measurements @{ before = $record.before; after = $record.after } -SkipReason $record.skipReason -Message $(if ($record.error) { $record.error } else { $record.reason })
         }
         $activeFileContext.InputPath = $null
         $State.CurrentFileElapsedSec = 0.0
@@ -2725,16 +3040,14 @@ function Invoke-Normalize {
     & $Logger "[INFO ] 出力フォルダ: $OutputDir"
     if ($fail -gt 0) { & $Logger "[WARN ] $fail 件のファイル処理に失敗しました。" }
     if ($cancelled -gt 0) { & $Logger "[INFO ] $cancelled 件のファイル処理がキャンセルされました。" }
-    if ($skipped -gt 0) { & $Logger "[INFO ] $skipped 件のファイルが衝突回避または正規化不要判定でスキップされました。" }
+    $skipCounts = Get-MediaNormalizerSkipReasonCounts ($State.ReportRecords.GetRange($firstRecord, $State.ReportRecords.Count - $firstRecord).ToArray())
+    if ($skipped -gt 0) {
+        & $Logger "[INFO ] スキップ $skipped 件（出力名の衝突 $($skipCounts.collision)、正規化不要コピー $($skipCounts['already-compliant'])、無音 $($skipCounts.silent)）"
+    }
     if ($planned) {
         return @{ Success = $ok; Analyzed = $analyzed; Fail = $fail; Cancelled = $cancelled; Skipped = $skipped }
     }
-    $report = Save-NormalizationRunReport $State $Mode $ReportMode $Logger @{
-        targetLufs = $Target; truePeakDbtp = $TruePeak; bitrate = $Bitrate; sampleRate = $SampleRate
-        audioOutputFormat = $AudioOutputFormat; analyzeOnly = [bool]$AnalyzeOnly
-        skipIfNormalized = $SkipIfNormalized; normalizationTolerance = $NormalizationTolerance
-        recurse = $Recurse; preserveHierarchy = $PreserveHierarchy
-    }
+    $report = Save-NormalizationRunReport $State $Mode $ReportMode $Logger $configuration $isDestinationProtected
 
     $finalResult = @{
         Success   = $ok
@@ -2742,6 +3055,7 @@ function Invoke-Normalize {
         Fail      = $fail
         Cancelled = $cancelled
         Skipped   = $skipped
+        SkipReasonCounts = $skipCounts
         ReportPath = $State.ReportPath
         ReportSucceeded = $report.Succeeded
         ReportError = $report.Error
@@ -2832,7 +3146,7 @@ function Invoke-NormalizeCli {
 
         $audioExts = Get-AudioInputExtensions
         $videoExts = Get-VideoInputExtensions
-        $allFiles = Get-MediaInputFiles -InputPath $effectiveInputPaths -Recurse:$Recurse
+        $allFiles = Get-MediaInputFiles -InputPath $effectiveInputPaths -Recurse:$Recurse -OutputDir $OutputDir -Logger { param($m) Write-Host $m }
         $files = @($allFiles | Where-Object {
             $_.Extension.ToLowerInvariant() -in @($audioExts + $videoExts)
         })
@@ -2944,4 +3258,4 @@ function Invoke-NormalizeCli {
     $global:LASTEXITCODE = $cliExitCode
 }
 
-Export-ModuleMember -Function New-MediaNormalizerState, Find-FfmpegNormalize, Resolve-UniqueOutputPath, Invoke-Normalize, Invoke-NormalizeCli, Get-AudioInputExtensions, Get-VideoInputExtensions, Get-AudioOutputFormats, Get-AudioOutputProfile, Get-MediaInputFiles, Get-MediaInputRoot, Get-RelativeMediaPath, Resolve-MediaOutputDirectory, New-SafeOutputPath, Get-MediaInputFileInfo, Get-MediaInventory, Test-MediaNormalizerContainer, Compare-MediaInventory, Complete-SafeOutput, Get-MediaLoudnessAnalysis, Test-NormalizationNeeded, Write-NormalizationReport, ConvertTo-SpeedPercent, Get-LoudnessParameterRange, Test-LoudnessParameter, Get-SpeedIntermediateProfile, Test-VideoSpeedChangeSafety
+Export-ModuleMember -Function Get-MediaNormalizerOutputLoudnessTolerance, Get-MediaNormalizerSkipReasonCounts, New-MediaNormalizerInputProtection, New-MediaNormalizerState, Find-FfmpegNormalize, Resolve-UniqueOutputPath, Invoke-Normalize, Invoke-NormalizeCli, Get-AudioInputExtensions, Get-VideoInputExtensions, Get-AudioOutputFormats, Get-AudioOutputProfile, Get-MediaInputFiles, Get-MediaInputRoot, Get-RelativeMediaPath, Resolve-MediaOutputDirectory, New-SafeOutputPath, Get-MediaInputFileInfo, Get-MediaInventory, Test-MediaNormalizerContainer, Compare-MediaInventory, Complete-SafeOutput, Get-MediaLoudnessAnalysis, Test-NormalizationNeeded, Write-NormalizationReport, ConvertTo-SpeedPercent, Get-LoudnessParameterRange, Test-LoudnessParameter, Get-SpeedIntermediateProfile, Test-VideoSpeedChangeSafety

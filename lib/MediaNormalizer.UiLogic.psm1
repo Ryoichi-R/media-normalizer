@@ -733,6 +733,8 @@ function Get-InputFiles {
     param(
         [string]$InputDir,
         [string[]]$InputPaths,
+        [string]$OutputDir,
+        [scriptblock]$Logger,
         [switch]$Recurse
     )
     $paths = @(
@@ -742,7 +744,7 @@ function Get-InputFiles {
             $InputDir
         }
     )
-    return MediaNormalizer.Core\Get-MediaInputFiles -InputPath $paths -Recurse:$Recurse
+    return MediaNormalizer.Core\Get-MediaInputFiles -InputPath $paths -Recurse:$Recurse -OutputDir $OutputDir -Logger $Logger
 }
 
 function Set-UIEnabled {

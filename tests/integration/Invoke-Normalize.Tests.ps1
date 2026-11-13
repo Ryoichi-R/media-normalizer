@@ -157,7 +157,7 @@ Describe 'Invoke-Normalize integration' -Tag 'Integration' -Skip:(-not ($ffmpegA
             -Target $measuredTarget `
             -TruePeak 0 `
             -Bitrate 192k `
-            -SampleRate 48000 `
+            -SampleRate 44100 `
             -CollisionPolicy rename `
             -AudioOutputFormat wav `
             -NormalizationTolerance 0.1 `
@@ -331,12 +331,12 @@ Describe 'Invoke-Normalize integration' -Tag 'Integration' -Skip:(-not ($ffmpegA
             Select-Object -First 1
         $record | Should -Not -BeNullOrEmpty
         [math]::Abs([double]$record.after.streams[0].integratedLufs - (-16.0)) |
-            Should -BeLessOrEqual 1.0
-        [double]$record.after.streams[0].truePeakDbtp | Should -BeLessOrEqual (-1.0 + 0.4)
+            Should -BeLessOrEqual 0.5
+        [double]$record.after.streams[0].truePeakDbtp | Should -BeLessOrEqual -1.0
         $record.validation.IsValid | Should -BeTrue
 
         ($logs -join "`n") | Should -Match '\-t\s+-16\.0'
-        ($logs -join "`n") | Should -Match '\-tp\s+-1\.0'
+        ($logs -join "`n") | Should -Match '\-tp\s+-1\.5'
 
         $outputInventory.StreamCounts.audio | Should -Be $inputInventory.StreamCounts.audio
         $outputInventory.StreamCounts.video | Should -Be $inputInventory.StreamCounts.video

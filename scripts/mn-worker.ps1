@@ -205,36 +205,6 @@ function New-MediaNormalizerWorkerControl {
     return @{ Context = $workerContext; State = $state; Events = $eventsOut; Pump = $inputPump }
 }
 
-function Get-MediaNormalizerInputIdentity {
-    param([string]$Path)
-
-    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
-    if (-not $item -or $item.PSIsContainer) { return }
-    if ($item.LinkTarget) { $item = Get-Item -LiteralPath $item.ResolvedTarget -Force -ErrorAction SilentlyContinue }
-    if ($item -and $item.PSObject.Properties['UnixStat'] -and $item.UnixStat) {
-        return "$($item.UnixStat.DeviceId):$($item.UnixStat.Inode)"
-    }
-    if ($item) { return $item.FullName }
-}
-
-function New-MediaNormalizerInputProtection {
-    param([string[]]$Paths)
-
-    $names = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    $identities = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    foreach ($path in $Paths) {
-        [void]$names.Add([IO.Path]::GetFullPath($path))
-        $identity = Get-MediaNormalizerInputIdentity $path
-        if ($identity) { [void]$identities.Add($identity) }
-    }
-    return {
-        param([string]$Path)
-        if ($names.Contains([IO.Path]::GetFullPath($Path))) { return $true }
-        $identity = Get-MediaNormalizerInputIdentity $Path
-        return $identity -and $identities.Contains($identity)
-    }.GetNewClosure()
-}
-
 function Get-MediaNormalizerOutputRoute {
     param([IO.FileInfo]$File, $Inventory, [Collections.IDictionary]$Command)
 
@@ -309,9 +279,15 @@ function Invoke-MediaNormalizerWorkerPlannedScan {
     $control = New-MediaNormalizerWorkerControl -RunId $Command.runId
     $root = Get-MediaInputRoot -InputPath $Command.paths
     $extensions = @(Get-AudioInputExtensions)
-    $allFiles = Get-MediaInputFiles -InputPath $Command.paths -Recurse:$Command.recurse
+    $allFiles = Get-MediaInputFiles -InputPath $Command.paths -Recurse:$Command.recurse -OutputDir $Command.outputDir -Logger {
+        param($message)
+        Write-MediaNormalizerWorkerEvent ([ordered]@{ schemaVersion = 1; type = 'log'; runId = $Command.runId; level = 'info'; message = $message })
+    }
     $files = @($allFiles | Where-Object { $_.Extension -in $extensions })
     $protected = New-MediaNormalizerInputProtection -Paths @($files | ForEach-Object FullName)
+    $audioFormat = if ($Command.outputSelection -in (Get-AudioOutputFormats)) { $Command.outputSelection } else { $Command.audioOutputFormat }
+    $requestedRate = if ($Command.Contains('sampleRate')) { $Command.sampleRate } else { '48000' }
+    $profile = Get-AudioOutputProfile -Format $audioFormat -SampleRate $requestedRate
     $results = [Collections.Generic.List[object]]::new()
     foreach ($file in $files) {
         & $control.Pump
@@ -329,6 +305,9 @@ function Invoke-MediaNormalizerWorkerPlannedScan {
             if ($_.Exception.Message.StartsWith('[RECOVERY_REQUIRED]')) { throw }
             if ($control.State.CancelRequested) { break }
             $route = @{ kind = 'unknown'; formats = @(); reason = $_.Exception.Message; speedReason = $null; warning = $null }
+        }
+        if ($profile.SampleRateReason -and $profile.Format -in $route.formats) {
+            $route.warning = (@($route.warning, $profile.SampleRateReason) | Where-Object { $_ }) -join ' '
         }
         $destinations = @()
         if ($Command.outputDir -and $route.formats.Count -gt 0) {
@@ -371,6 +350,14 @@ function Get-MediaNormalizerWorkerBatch {
         @($Options.InputPath | Where-Object { -not $snapshots.ContainsKey($_) -or -not $protectedPaths.Contains($_) }).Count -gt 0) {
         throw 'スキャンの入力ルートまたは選択情報が一致しません。再スキャンしてください。'
     }
+
+    $currentFiles = Get-MediaInputFiles -InputPath $Command.scanPaths -Recurse:$Options.Recurse -OutputDir $Options.OutputDir
+    $currentPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($file in $currentFiles) { [void]$currentPaths.Add($file.FullName) }
+    if (@($Options.InputPath | Where-Object { -not $currentPaths.Contains($_) -and (Test-Path -LiteralPath $_) }).Count -gt 0) {
+        throw '選択した入力が現在の入力範囲外です。再スキャンしてください。'
+    }
+    foreach ($path in $Command.protectedInputs) { [void]$currentPaths.Add($path) }
 
     $groups = [ordered]@{ audio = [Collections.Generic.List[IO.FileInfo]]::new(); video = [Collections.Generic.List[IO.FileInfo]]::new() }
     $inventories = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
@@ -420,14 +407,14 @@ function Get-MediaNormalizerWorkerBatch {
             })
             Write-MediaNormalizerWorkerEvent ([ordered]@{
                 schemaVersion = 1; type = 'file-done'; runId = $Options.RunId; inputPath = $path; outputPath = $null
-                status = $status; measurements = $null; message = $message
+                status = $status; measurements = $null; skipReason = $null; message = $message
             })
             Write-MediaNormalizerWorkerEvent ([ordered]@{
                 schemaVersion = 1; type = 'log'; runId = $Options.RunId; level = 'warning'; message = "$path — $message"
             })
         }
     }
-    return @{ Groups = $groups; Inventories = $inventories; Protected = (New-MediaNormalizerInputProtection -Paths $Command.protectedInputs) }
+    return @{ Groups = $groups; Inventories = $inventories; Protected = (New-MediaNormalizerInputProtection -Paths @($currentPaths)) }
 }
 
 function ConvertTo-MediaNormalizerWorkerOptions {
@@ -554,19 +541,22 @@ function Invoke-MediaNormalizerWorkerNormalize {
                 Join-Path $options.OutputDir ('media-normalizer-report-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.json')
             }
             try {
-                if (& $batch.Protected $reportPath) { throw 'レポート出力先が入力原本を指しています。' }
-                $reportPath = Write-NormalizationReport -Path $reportPath -Records $state.ReportRecords.ToArray() -Configuration @{
+                $reportPath = Write-NormalizationReport -Path $reportPath -IsProtectedInput $batch.Protected -Records $state.ReportRecords.ToArray() -Configuration @{
                     outputSelection = $Command.outputSelection
                     audioOutputFormat = $options.AudioOutputFormat
                     targetLufs = $options.Target; truePeakDbtp = $options.TruePeak
                     bitrate = $options.Bitrate; sampleRate = $options.SampleRate
                     analyzeOnly = $options.AnalyzeOnly; skipIfNormalized = $options.SkipIfNormalized
                     normalizationTolerance = $options.NormalizationTolerance
+                    outputLoudnessToleranceLu = Get-MediaNormalizerOutputLoudnessTolerance
+                    effectiveCopyToleranceLu = [math]::Min($options.NormalizationTolerance, (Get-MediaNormalizerOutputLoudnessTolerance))
                     recurse = $options.Recurse; preserveHierarchy = $options.PreserveHierarchy
                 }
             } catch {
                 $reportSucceeded = $false
-                Write-MediaNormalizerWorkerError -Code 'REPORT_FAILED' -Message $_.Exception.Message -RunId $options.RunId
+                $committedOutputs = @($state.ReportRecords | Where-Object { $_.outputPath }).Count
+                Write-MediaNormalizerWorkerError -Code 'REPORT_FAILED' -RunId $options.RunId -Message (
+                    "レポートの保存に失敗しました: $reportPath。確定済み出力: $committedOutputs 件。$($_.Exception.Message)")
             }
         }
         if ($workerContext.FatalError) { throw "[RECOVERY_REQUIRED] $($workerContext.FatalError)" }
@@ -586,6 +576,7 @@ function Invoke-MediaNormalizerWorkerNormalize {
                 schemaVersion = 1; type = 'run-done'; runId = $options.RunId
                 success = [int]$totals.Success; analyzed = [int]$totals.Analyzed; fail = [int]$totals.Fail
                 skipped = [int]$totals.Skipped; cancelled = [int]$totals.Cancelled
+                skipReasonCounts = Get-MediaNormalizerSkipReasonCounts $state.ReportRecords.ToArray()
                 reportPath = $reportPath; reportSucceeded = $reportSucceeded
             })
         } finally {

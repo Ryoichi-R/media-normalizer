@@ -297,6 +297,8 @@ Describe 'MediaNormalizer.Core coverage contracts' {
                 }
                 $inventory = [pscustomobject]@{
                     StreamCounts = [pscustomobject]@{ audio = 1; video = 0; subtitle = 0; data = 0; attachment = 0 }
+                    FormatName = 'mp3'; FormatTags = $null; RealVideoCount = 0
+                    StreamTags = @([pscustomobject]@{ Type = 'audio'; SampleRate = '48000' })
                     ChapterCount = 0
                 }
                 $integrity = [pscustomobject]@{ IsValid = $true; Warnings = @(); Errors = @(); DroppedAudioStreams = 0 }

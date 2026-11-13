@@ -23,6 +23,7 @@ public sealed class MainWindow : Window
     private readonly ComboBox _format = new() { MinWidth = 240 };
     private readonly StackPanel _migrationNotice = new() { IsVisible = false, Spacing = 6 };
     private string[] _outputSelections = [];
+    private bool _reportFailed;
     private string[] _scanPaths = [];
     private string? _scanRoot;
     private string? _scanStatus;
@@ -86,6 +87,7 @@ public sealed class MainWindow : Window
         _options.Children.Add(Line(Label("プリセット"), _presets, Label("出力形式"), _format));
         _options.Children.Add(_migrationNotice);
         _options.Children.Add(Line(Label("目標 LUFS"), _target, Label("上限 dBTP"), _peak, Label("速度 %"), _speed, Label("同名出力"), _collision));
+        ToolTip.SetTip(_skip, "コピーには目標音量との差が 0.5 LU 以内で、指定形式とサンプルレートにも適合する必要があります。");
         _options.Children.Add(Line(_analyze, _recurse, _hierarchy, _skip));
         _options.Children.Add(_basis);
         var body = new Grid { RowDefinitions = new RowDefinitions("Auto,Auto,Auto,2*,Auto,3*"), Margin = new Thickness(20), RowSpacing = 10 };
@@ -111,7 +113,8 @@ public sealed class MainWindow : Window
         _scan.Click += async (_, _) => await ScanAsync();
         _run.Click += async (_, _) => { try { await NormalizeAsync(); } catch (Exception exception) { AppendLog(exception.Message); _status.Text = "入力内容をご確認ください。"; } };
         _cancel.Click += (_, _) => { _cancelSource?.Cancel(); _status.Text = "キャンセル・回収完了を待っています…"; _cancel.IsEnabled = false; };
-        _input.TextChanged += (_, _) => InvalidateScan(); _output.TextChanged += (_, _) => InvalidateScan();
+        _input.TextChanged += (_, _) => InvalidateScan();
+        _output.PropertyChanged += (_, change) => { if (change.Property == TextBox.TextProperty) InvalidateScan(); };
         _format.SelectionChanged += (_, _) => InvalidateScan();
         _collision.SelectionChanged += (_, _) => InvalidateScan();
         _presets.SelectionChanged += (_, _) => ApplyPreset();
@@ -295,6 +298,7 @@ public sealed class MainWindow : Window
             {
                 ["cmd"] = "scan", ["paths"] = _scanPaths, ["outputSelection"] = SelectedOutput,
                 ["audioOutputFormat"] = PresetAudioFormat, ["outputDir"] = _output.Text?.Trim() ?? "",
+                ["sampleRate"] = _presetValues[_presets.SelectedIndex].GetProperty("sampleRate").GetInt32().ToString(CultureInfo.InvariantCulture),
                 ["analyzeOnly"] = _analyze.IsChecked == true, ["recurse"] = _recurse.IsChecked == true,
                 ["preserveHierarchy"] = _hierarchy.IsChecked == true, ["collisionPolicy"] = _collision.SelectedItem
             });
@@ -333,10 +337,12 @@ public sealed class MainWindow : Window
         SaveSettings();
         await WithBusyAsync(async () =>
         {
-            _status.Text = "処理中…"; _progress.Value = 0;
+            _status.Text = "処理中…"; _progress.Value = 0; _reportFailed = false;
             var result = await ExecuteAsync(command);
-            if (!_blocked) _status.Text = result.ExitCode == 3 ? "別の処理が実行中です。" : _cancelSource?.IsCancellationRequested == true ? "キャンセルと回収が完了しました。" : result.ExitCode == 0 ? "処理が完了しました。" : "処理が終了しました。失敗内容はログ・レポートをご確認ください。";
-            AppendLog("レポート: " + command["reportPath"]);
+            if (!_blocked) _status.Text = result.ExitCode == 3 ? "別の処理が実行中です。"
+                : _reportFailed ? "処理は終了しましたが、レポートを保存できませんでした。出力結果はログをご確認ください。"
+                : _cancelSource?.IsCancellationRequested == true ? "キャンセルと回収が完了しました。"
+                : result.ExitCode == 0 ? "処理が完了しました。" : "処理が終了しました。失敗内容はログ・レポートをご確認ください。";
             _scanned = false;
         });
     }
@@ -350,6 +356,12 @@ public sealed class MainWindow : Window
             string.Join(" / ", selected.SelectMany(row => row.Formats)
                 .GroupBy(format => format, StringComparer.Ordinal)
                 .Select(group => $"{group.Key.ToUpperInvariant()} {group.Count()} 件"));
+        var notices = new List<string>();
+        if (_analyze.IsChecked != true && _target.Value >= _peak.Value)
+            notices.Add("目標 LUFS が True Peak 上限以上のため、適合できない場合があります。");
+        notices.AddRange(selected.Select(row => row.Warning).OfType<string>()
+            .Where(warning => warning.Contains("48,000 Hz", StringComparison.Ordinal)).Distinct(StringComparer.Ordinal));
+        if (notices.Count > 0) summary += "\n" + string.Join("\n", notices);
         dialog.Content = new StackPanel { Margin = new Thickness(20), Spacing = 18, Children = {
             new TextBlock { Text = $"{summary}\n目標 {_target.Value} LUFS・上限 {_peak.Value} dBTP\n同名出力: {_collision.SelectedItem}\n出力先: {_output.Text}", TextWrapping = Avalonia.Media.TextWrapping.Wrap }, Line(yes,no) } };
         return await dialog.ShowDialog<bool>(this);
@@ -429,9 +441,28 @@ public sealed class MainWindow : Window
                 foreach (var row in _rows.Where(r => r.Path == filePath))
                 {
                     var status = value.GetProperty("status").GetString();
-                    if (row.Status.Text != "failed" || status == "failed") row.Status.Text = status;
-                    if (value.GetProperty("message").GetString() is { } reason) ToolTip.SetTip(row.Status, reason);
+                    if (row.Status.Text != "failed" || status == "failed")
+                    {
+                        row.Status.Text = status == "skipped"
+                            ? value.TryGetProperty("skipReason", out var reasonCode) ? reasonCode.GetString() switch
+                            {
+                                "silent" => "無音のためスキップ",
+                                "already-compliant" => "正規化不要のためコピー",
+                                "collision" => "出力名の衝突でスキップ",
+                                _ => "スキップ（理由不明）"
+                            } : "スキップ（理由不明）"
+                            : status;
+                        if (value.GetProperty("message").GetString() is { } reason) ToolTip.SetTip(row.Status, reason);
+                    }
                 }
+                break;
+            case "run-done":
+                var report = value.GetProperty("reportSucceeded");
+                _reportFailed = report.ValueKind == JsonValueKind.False;
+                if (report.ValueKind == JsonValueKind.True)
+                    AppendLog("レポート: " + value.GetProperty("reportPath").GetString());
+                if (value.TryGetProperty("skipReasonCounts", out var counts) && value.GetProperty("skipped").GetInt32() > 0)
+                    AppendLog($"スキップ — 出力名の衝突 {counts.GetProperty("collision").GetInt32()}、正規化不要コピー {counts.GetProperty("already-compliant").GetInt32()}、無音 {counts.GetProperty("silent").GetInt32()}");
                 break;
             case "error": case "log":
                 if (value.TryGetProperty("message",out var message)) AppendLog(message.GetString() ?? "");

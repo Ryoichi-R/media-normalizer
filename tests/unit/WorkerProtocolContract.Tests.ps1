@@ -34,6 +34,20 @@ Describe 'Worker protocol contract' {
         }
     }
 
+    It 'rejects skip reasons inconsistent with status, output, or aggregate counts' {
+        $file = Get-Content -LiteralPath (Join-Path $script:fixtureRoot 'event-file-done-skip-reasons.json') -Raw | ConvertFrom-Json -AsHashtable
+        $file.skipReason = 'already-compliant'
+        (Test-MediaNormalizerWorkerEvent $file).IsValid | Should -BeFalse
+        $file.status = 'failed'
+        (Test-MediaNormalizerWorkerEvent $file).IsValid | Should -BeFalse
+
+        $run = Get-Content -LiteralPath (Join-Path $script:fixtureRoot 'event-run-done-skip-reasons.json') -Raw | ConvertFrom-Json -AsHashtable
+        $run.skipReasonCounts.silent = 2
+        (Test-MediaNormalizerWorkerEvent $run).IsValid | Should -BeFalse
+        $run.skipReasonCounts.silent = '1'
+        (Test-MediaNormalizerWorkerEvent $run).IsValid | Should -BeFalse
+    }
+
     It 'rejects unknown versions, missing fields, wrong numeric types, and extra fields' {
         $scan = Get-Content -LiteralPath (Join-Path $script:fixtureRoot 'command-scan.json') -Raw | ConvertFrom-Json -AsHashtable
         $scan.schemaVersion = 2

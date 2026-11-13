@@ -1,4 +1,4 @@
-Set-StrictMode -Version Latest
+﻿Set-StrictMode -Version Latest
 
 function Get-MediaNormalizerPlatform {
     [CmdletBinding()]
@@ -389,4 +389,96 @@ function Stop-MediaNormalizerProcessTree {
     }
 }
 
-Export-ModuleMember -Function Get-MediaNormalizerPlatform, Get-MediaNormalizerRuntimeExecutablePath, Get-MediaNormalizerBinaryArchitecture, Assert-MediaNormalizerWritablePath, Get-MediaNormalizerStoragePath, Resolve-MediaNormalizerCommand, Stop-MediaNormalizerProcessTree
+function Get-MediaNormalizerWindowsFinalPath {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not ('MediaNormalizer.NativeFilePath' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+namespace MediaNormalizer
+{
+    public static class NativeFilePath
+    {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeFileHandle CreateFile(string path, uint access, uint share,
+            IntPtr security, uint disposition, uint flags, IntPtr template);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandle(SafeFileHandle file,
+            StringBuilder path, uint capacity, uint flags);
+
+        public static string Resolve(string path)
+        {
+            // Metadata-only handle, with directory support and no exclusive sharing.
+            using (var handle = CreateFile(path, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero))
+            {
+                if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+                var result = new StringBuilder(512);
+                uint length = GetFinalPathNameByHandle(handle, result, (uint)result.Capacity, 0);
+                if (length >= result.Capacity)
+                {
+                    result.EnsureCapacity(checked((int)length + 1));
+                    length = GetFinalPathNameByHandle(handle, result, (uint)result.Capacity, 0);
+                }
+                if (length == 0 || length >= result.Capacity)
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                return result.ToString();
+            }
+        }
+    }
+}
+'@ -ErrorAction Stop
+    }
+    return [MediaNormalizer.NativeFilePath]::Resolve($Path)
+}
+
+function Get-MediaNormalizerFileIdentity {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if ((Get-MediaNormalizerPlatform) -eq 'Windows') {
+        return Get-MediaNormalizerWindowsFinalPath -Path $Path
+    }
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.LinkTarget) {
+        $item = Get-Item -LiteralPath $item.ResolvedTarget -Force -ErrorAction Stop
+    }
+    if ($item.PSObject.Properties['UnixStat'] -and $item.UnixStat) {
+        return "$($item.UnixStat.DeviceId):$($item.UnixStat.Inode)"
+    }
+    throw "ファイルの実体を確認できません: $Path"
+}
+
+function Resolve-MediaNormalizerDirectoryPath {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $existing = [IO.Path]::GetFullPath($Path)
+    $missing = [Collections.Generic.Stack[string]]::new()
+    while (-not [IO.Directory]::Exists($existing)) {
+        $parent = [IO.Path]::GetDirectoryName($existing)
+        if (-not $parent) { throw "ディレクトリの実体を確認できません: $Path" }
+        $missing.Push([IO.Path]::GetFileName($existing))
+        $existing = $parent
+    }
+    if ((Get-MediaNormalizerPlatform) -eq 'Windows') {
+        $resolved = Get-MediaNormalizerWindowsFinalPath $existing
+    } else {
+        $item = Get-Item -LiteralPath $existing -Force -ErrorAction Stop
+        $parts = [Collections.Generic.Stack[string]]::new()
+        while ($item.Parent) {
+            if ($item.LinkTarget) { $item = $item.ResolveLinkTarget($true); continue }
+            $parts.Push($item.Name)
+            $item = $item.Parent
+        }
+        $resolved = $item.FullName
+        foreach ($part in $parts) { $resolved = [IO.Path]::Combine($resolved, $part) }
+    }
+    foreach ($part in $missing) { $resolved = [IO.Path]::Combine($resolved, $part) }
+    return $resolved
+}
+
+Export-ModuleMember -Function Resolve-MediaNormalizerDirectoryPath, Get-MediaNormalizerFileIdentity, Get-MediaNormalizerPlatform, Get-MediaNormalizerRuntimeExecutablePath, Get-MediaNormalizerBinaryArchitecture, Assert-MediaNormalizerWritablePath, Get-MediaNormalizerStoragePath, Resolve-MediaNormalizerCommand, Stop-MediaNormalizerProcessTree

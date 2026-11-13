@@ -108,6 +108,11 @@ using var session = HeadlessUnitTestSession.StartNew(typeof(MediaNormalizer.Gui.
 var guiChecks = session.Dispatch(async () =>
 {
     var runtime = new GuiRuntime(resources,state);
+    var reliabilityInputs = Directory.CreateDirectory(Path.Combine(state, "reliability-inputs")).FullName;
+    var tone = Path.Combine(reliabilityInputs, "tone.wav");
+    var silent = Path.Combine(reliabilityInputs, "silent.wav");
+    await NewWaveAsync(runtime, tone, "sine=frequency=1000:sample_rate=48000");
+    await NewWaveAsync(runtime, silent, "anullsrc=r=48000:cl=mono");
     var window = new MainWindow(runtime);
     window.Show();
     await WaitAsync(() => window.IsReady || window.CurrentStatus.StartsWith("起動できません",StringComparison.Ordinal));
@@ -156,7 +161,7 @@ var guiChecks = session.Dispatch(async () =>
     Check(window.FileCount == 8 && window.CanRun,"Rescan after cancellation succeeds");
 
     using (var frame = window.CaptureRenderedFrame()) frame?.Save(Path.Combine(state,"window.png"));
-    boxes[0].Text = Path.Combine(fixtures,"audio-dynamic.wav");
+    boxes[0].Text = tone;
     await window.ScanAsync();
     Check(window.FileCount == 1 && window.CanRun,"Single-file normalization ready");
     var run = window.GetLogicalDescendants().OfType<Button>().Single(b => Equals(b.Content,"実行"));
@@ -170,6 +175,37 @@ var guiChecks = session.Dispatch(async () =>
     using (var data = JsonDocument.Parse(await File.ReadAllTextAsync(report)))
         Check(data.RootElement.GetProperty("summary").GetProperty("normalized").GetInt32() == 1,"GUI report normalized one file");
     Check(!window.CanRun,"Run requires confirmation scan after completion");
+    boxes[0].Text = Path.Combine(fixtures, "audio-dynamic.wav");
+    await window.ScanAsync();
+    await ConfirmRunAsync(window);
+    await WaitAsync(() => window.CurrentStatus.StartsWith("処理が終了", StringComparison.Ordinal));
+    Check(File.ReadAllText(runtime.LogPath).Contains("出力の音量が指定条件を満たしません", StringComparison.Ordinal),
+        "Measured loudness rejection appears in the GUI log");
+
+    boxes[0].Text = tone;
+    preset.SelectedItem = "Custom";
+    format.SelectedItem = format.Items.Single(item => item?.ToString() == "OPUS");
+    await window.ScanAsync();
+    Check(Rows(window).Single().Details.Text!.Contains("48,000 Hz", StringComparison.Ordinal), "Opus correction appears during scan");
+    boxes[1].Text = Path.Combine(state, "opus-output");
+    Check(!window.CanRun, "Changing the output folder invalidates the scan");
+    await window.ScanAsync();
+    Check(window.CanRun, "Rescan after an output folder change enables run");
+    await ConfirmRunAsync(window);
+    await WaitAsync(() => window.CurrentStatus == "処理が完了しました。");
+    Check(File.Exists(Path.Combine(state, "opus-output", "tone.opus")), "Opus output exists");
+
+    boxes[0].Text = silent;
+    await window.ScanAsync();
+    await ConfirmRunAsync(window);
+    await WaitAsync(() => window.CurrentStatus == "処理が完了しました。");
+    Check(window.GetLogicalDescendants().OfType<TextBlock>().Any(text => text.Text == "無音のためスキップ"),
+        "Silent input shows its specific skip reason");
+    Check(!File.Exists(Path.Combine(state, "opus-output", "silent.opus")), "Silence produces no Opus output");
+
+    preset.SelectedIndex = 0;
+    format.SelectedItem = format.Items.Single(item => item?.ToString() == "FLAC");
+    boxes[1].Text = Path.Combine(state, "output");
     if (args.Length == 4)
     {
         boxes[0].Text = Path.GetFullPath(args[3]);
@@ -247,7 +283,7 @@ var guiChecks = session.Dispatch(async () =>
     pending.Show();
     await WaitAsync(() => pending.IsReady);
     var pendingBoxes = pending.GetLogicalDescendants().OfType<TextBox>().Where(b => !b.IsReadOnly).ToArray();
-    pendingBoxes[0].Text = Path.Combine(fixtures, "audio-dynamic.wav"); pendingBoxes[1].Text = Path.Combine(state, "pending-output");
+    pendingBoxes[0].Text = tone; pendingBoxes[1].Text = Path.Combine(state, "pending-output");
     await pending.ScanAsync();
     pending.GetLogicalDescendants().OfType<Button>().Single(b => Equals(b.Content, "実行")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
     await WaitAsync(() => pending.OwnedWindows.Count > 0);
@@ -305,6 +341,27 @@ catch (Exception exception)
 }
 Console.WriteLine("GUI headless initialization, Core scan, invalidation, settings, activation and missing-runtime checks passed.");
 return 0;
+
+static async Task NewWaveAsync(GuiRuntime runtime, string path, string filter)
+{
+    var start = new System.Diagnostics.ProcessStartInfo(runtime.EnvironmentVariables["FFMPEG_PATH"]!)
+    {
+        UseShellExecute = false
+    };
+    foreach (var argument in new[] { "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", filter, "-t", "3", path })
+        start.ArgumentList.Add(argument);
+    using var process = System.Diagnostics.Process.Start(start) ?? throw new InvalidOperationException("Could not start fixture generation.");
+    await process.WaitForExitAsync();
+    Check(process.ExitCode == 0, "Generated GUI audio fixture");
+}
+
+static async Task ConfirmRunAsync(MainWindow window)
+{
+    window.GetLogicalDescendants().OfType<Button>().Single(b => Equals(b.Content, "実行")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+    await WaitAsync(() => window.OwnedWindows.Count > 0);
+    window.OwnedWindows.Single().GetLogicalDescendants().OfType<Button>()
+        .Single(b => Equals(b.Content, "この内容で実行")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+}
 
 static void Check(bool condition,string message) { if (!condition) throw new InvalidOperationException(message); }
 static (CheckBox Box, TextBlock Details, string Name)[] Rows(MainWindow window) =>

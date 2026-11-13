@@ -141,7 +141,7 @@ function Test-MediaNormalizerWorkerMessage {
                 $required += if ($planned) {
                     @('outputSelection', 'runId', 'audioOutputFormat', 'analyzeOnly', 'outputDir', 'preserveHierarchy', 'collisionPolicy')
                 } else { 'mode' }
-                $allowed = $required
+                $allowed = if ($planned) { $required + @('sampleRate') } else { $required }
             }
             'normalize' {
                 $required = $idRequired + @('runId', 'inputPaths', 'outputDir', 'mode', 'target', 'truePeak', 'bitrate', 'sampleRate', 'collisionPolicy', 'speedPercent', 'audioOutputFormat', 'analyzeOnly', 'skipIfNormalized', 'normalizationTolerance', 'recurse', 'preserveHierarchy')
@@ -188,6 +188,9 @@ function Test-MediaNormalizerWorkerMessage {
                     -not (Test-MediaNormalizerWorkerEnum $data.collisionPolicy @('rename', 'skip', 'overwrite')) -or
                     -not (Test-MediaNormalizerWorkerEnum $data.audioOutputFormat $script:WorkerAudioFormats))) {
                     $errors.Add('planned scan fields are invalid')
+                }
+                if ($planned -and $data.Contains('sampleRate') -and -not (Test-MediaNormalizerWorkerString $data.sampleRate)) {
+                    $errors.Add('sampleRate must be a non-empty string')
                 }
             }
             'normalize' {
@@ -260,8 +263,8 @@ function Test-MediaNormalizerWorkerMessage {
             'file-start' { $required = $common + @('runId', 'fileIndex', 'total', 'inputPath'); $allowed = $required }
             'progress' { $required = $common + @('runId', 'percent', 'phase', 'eta', 'inputPath'); $allowed = $required }
             'log' { $required = $common + @('runId', 'level', 'message'); $allowed = $required }
-            'file-done' { $required = $common + @('runId', 'inputPath', 'outputPath', 'status', 'measurements', 'message'); $allowed = $required }
-            'run-done' { $required = $common + @('runId', 'success', 'analyzed', 'fail', 'skipped', 'cancelled', 'reportPath', 'reportSucceeded'); $allowed = $required }
+            'file-done' { $required = $common + @('runId', 'inputPath', 'outputPath', 'status', 'measurements', 'message'); $allowed = $required + @('skipReason') }
+            'run-done' { $required = $common + @('runId', 'success', 'analyzed', 'fail', 'skipped', 'cancelled', 'reportPath', 'reportSucceeded'); $allowed = $required + @('skipReasonCounts') }
             'error' { $required = $common + @('code', 'message'); $allowed = $required + @('runId', 'inputPath') }
             'process-starting' { $required = $common + @('runId', 'processToken', 'executablePath', 'arguments', 'parentProcessId', 'parentStartedAtUtc'); $allowed = $required }
             'process-started' { $required = $common + @('runId', 'processToken', 'processId', 'processStartedAtUtc', 'executablePath', 'parentProcessId', 'parentStartedAtUtc'); $allowed = $required }
@@ -334,6 +337,12 @@ function Test-MediaNormalizerWorkerMessage {
                 if ($null -ne $data.outputPath -and -not (Test-MediaNormalizerWorkerString $data.outputPath)) { $errors.Add('outputPath must be string or null') }
                 if (-not (Test-MediaNormalizerWorkerEnum $data.status @('normalized', 'analyzed', 'skipped', 'failed', 'cancelled'))) { $errors.Add('status is invalid') }
                 if ($null -ne $data.measurements -and $data.measurements -isnot [Collections.IDictionary]) { $errors.Add('measurements must be object or null') }
+                if ($data.Contains('skipReason')) {
+                    if ($data.status -ceq 'skipped') {
+                        if (-not (Test-MediaNormalizerWorkerEnum $data.skipReason @('collision', 'already-compliant', 'silent')) -or
+                            (($null -ne $data.outputPath) -ne ($data.skipReason -ceq 'already-compliant'))) { $errors.Add('skipReason does not match the skipped result') }
+                    } elseif ($null -ne $data.skipReason) { $errors.Add('skipReason must be null for other results') }
+                }
                 if ($null -ne $data.message -and -not (Test-MediaNormalizerWorkerString $data.message -AllowEmpty)) { $errors.Add('message must be string or null') }
             }
             'run-done' {
@@ -342,6 +351,22 @@ function Test-MediaNormalizerWorkerMessage {
                 }
                 if ($null -ne $data['reportPath'] -and -not (Test-MediaNormalizerWorkerString $data['reportPath'])) { $errors.Add('reportPath must be string or null') }
                 if ($null -ne $data.reportSucceeded -and -not (Test-MediaNormalizerWorkerBoolean $data.reportSucceeded)) { $errors.Add('reportSucceeded must be boolean or null') }
+                if ($data.Contains('skipReasonCounts')) {
+                    $counts = $data.skipReasonCounts
+                    $reasons = @('collision', 'already-compliant', 'silent')
+                    if ($counts -isnot [Collections.IDictionary] -or $counts.Count -ne $reasons.Count) {
+                        $errors.Add('skipReasonCounts must contain the three skip reasons')
+                    } else {
+                        $sum = 0L
+                        foreach ($reason in $reasons) {
+                            $count = $counts[$reason]
+                            if (-not (Test-MediaNormalizerWorkerNumber $count -Integer) -or $count -lt 0 -or $count -gt [int]::MaxValue) {
+                                $errors.Add("skipReasonCounts.$reason must be a non-negative integer")
+                            } else { $sum += [long]$count }
+                        }
+                        if ($sum -ne $data.skipped) { $errors.Add('skipReasonCounts must sum to skipped') }
+                    }
+                }
             }
             'error' {
                 if (-not (Test-MediaNormalizerWorkerString $data.code) -or -not (Test-MediaNormalizerWorkerString $data.message)) { $errors.Add('error code and message must be non-empty strings') }
